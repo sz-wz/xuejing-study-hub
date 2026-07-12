@@ -1,0 +1,25 @@
+# Dependencies and build output
+node_modules/
+dist/
+release/
+artifacts/
+tmp/
+*.tsbuildinfo
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs, caches and editor files
+*.log
+.vite/
+.cache/
+.codex/
+.gstack/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,66 @@
+{
+  "name": "xuejing-study-hub",
+  "version": "0.3.7",
+  "private": true,
+  "description": "本科生学习聚合与复习中枢（Windows MVP）",
+  "main": "electron/entry.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && electron .\"",
+    "dev:web": "vite",
+    "build": "tsc -b && vite build",
+    "start": "electron .",
+    "typecheck": "tsc -b",
+    "test": "vitest run && node --test electron/blackboard-portal.nodecheck.cjs electron/gradescope-portal.nodecheck.cjs electron/vault.nodecheck.cjs electron/knowledge.nodecheck.cjs electron/ocr.nodecheck.cjs electron/cloud-knowledge.nodecheck.cjs electron/renderer-events.nodecheck.cjs electron/document-preview.nodecheck.cjs electron/assignment-analysis.nodecheck.cjs",
+    "package:win": "npm run build && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.100",
+    "@tesseract.js-data/chi_sim": "^1.0.0",
+    "@tesseract.js-data/eng": "^1.0.0",
+    "@vitejs/plugin-react": "latest",
+    "cfb": "^1.2.2",
+    "docx-preview": "^0.4.0",
+    "jszip": "^3.10.1",
+    "lucide-react": "latest",
+    "pdfjs-dist": "^4.10.38",
+    "react": "latest",
+    "react-dom": "latest",
+    "tesseract.js": "^7.0.0",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "concurrently": "latest",
+    "electron": "latest",
+    "electron-builder": "latest",
+    "typescript": "latest",
+    "vitest": "latest",
+    "wait-on": "latest"
+  },
+  "build": {
+    "appId": "com.xuejing.studyhub",
+    "productName": "学径",
+    "artifactName": "学径-${version}-win-x64.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

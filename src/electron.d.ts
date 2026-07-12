@@ -1,0 +1,164 @@
+type BlackboardStatus = {
+  connected: boolean
+  portal: string
+  cookieCount: number
+}
+
+type GradescopeSyncResult = {
+  connected: boolean
+  courses: { name: string; term: string; url: string }[]
+  assignments: { courseName: string; term: string; title: string; url: string; meta: string; dueAt?: string; status: 'unknown' | 'not_submitted' | 'submitted' | 'graded'; score?: number; maxScore?: number }[]
+  message: string
+}
+
+type BlackboardSyncResult = {
+  connected: boolean
+  courses: { name: string; url: string }[]
+  message: string
+  diagnostics?: {
+    stage: string
+    httpStatus?: number
+    finalUrl?: string
+    htmlBytes?: number
+    courseLinkCount?: number
+    pageType?: string
+    error?: string
+  }
+}
+
+type BlackboardMaterial = {
+  title: string
+  type: 'PPT' | 'PDF' | '视频' | '文件' | '网页' | '作业'
+  kind: 'folder' | 'file' | 'link' | 'assignment'
+  url?: string
+  meta: string
+  courseName: string
+  path: string[]
+  dueAt?: string
+  status?: 'unknown' | 'not_submitted' | 'submitted' | 'graded'
+  score?: number
+  maxScore?: number
+}
+
+type BlackboardMaterialSyncResult = {
+  connected: boolean
+  materials: BlackboardMaterial[]
+  message: string
+  diagnostics?: {
+    stage: string
+    scannedCourses?: number
+    scannedFolders?: number
+    materialCount?: number
+    failedCourses?: number
+  }
+}
+
+type KnowledgeBuildDocument = {
+  materialId: string
+  courseId: string
+  courseName: string
+  title: string
+  localPath: string
+  type: string
+  knowledgeRole?: 'courseware' | 'reference'
+}
+
+type KnowledgeIndexResult = {
+  documents: { materialId: string; courseId: string; courseName: string; title: string; localPath: string; status: 'parsed' | 'ocr' | 'failed' | 'unsupported' | 'skipped' | 'empty' | 'image'; hash?: string; error?: string; outline?: string[]; textLength?: number; parsedAt?: string; knowledgeRole?: 'courseware' | 'reference'; ocr?: { pages: number; totalPages: number; language: string; truncated: boolean }; ai?: { summary: string; concepts: { title: string; evidence: string }[]; model: string; generatedAt: string; sourceHash?: string } }[]
+  concepts: { id: string; title: string; sourceIds: string[]; courseIds: string[] }[]
+  stats: { total: number; parsed: number; ocr: number; image: number; failed: number; unsupported: number; reference: number; concepts: number }
+}
+
+declare global {
+  interface Window {
+    xuejing?: {
+      platform: string
+      version: string
+      external: {
+        openUrl: (url: string) => Promise<{ opened: boolean }>
+      }
+      documents: {
+        openLocal: (filePath: string) => Promise<{ opened: boolean }>
+      }
+      deadlines: {
+        notify: (payload: { title: string; body: string }) => Promise<{ shown: boolean }>
+      }
+      assignments: {
+        details: (payload: { source: 'Blackboard' | 'Gradescope'; url: string }) => Promise<{ text: string; fetchedAt: string }>
+        importFiles: (payload: { courseName: string; assignmentId: string; assignmentTitle: string }) => Promise<{
+          cancelled: boolean
+          vaultRoot?: string
+          items: { id: string; title: string; type: 'PPT' | 'PDF' | '视频' | '文件'; localPath: string; managed: boolean }[]
+        }>
+        fileContents: (payload: { files: { localPath: string; title: string }[] }) => Promise<{ contents: { localPath: string; title: string; text: string; format?: string; error?: string }[] }>
+        removeFiles: (payload: { assignmentId: string; filePaths: string[] }) => Promise<{ removed: string[]; missing: string[]; rejected: string[] }>
+      }
+      vault: {
+        settings: () => Promise<{ vaultRoot: string }>
+        chooseRoot: () => Promise<{ cancelled: boolean; currentRoot: string; vaultRoot?: string }>
+        migrate: (payload: { targetRoot: string; mode: 'copy' | 'move' | 'switch' }) => Promise<{
+          vaultRoot: string; copied: number; deduplicated: number; moved: number; missing: number
+          relocated: { from: string; to: string }[]; failed: { path: string; error: string }[]
+        }>
+        verifyFiles: (payload: { paths: string[] }) => Promise<{ path: string; exists: boolean; bytes: number }[]>
+        matchBlackboardFiles: (payload: { urls: string[] }) => Promise<{ url: string; localPath: string; title: string; type: 'PPT' | 'PDF' | '视频' | '文件' }[]>
+        repairExtensions: () => Promise<{ repaired: number; repairedFiles: { from: string; to: string }[]; vaultRoot: string }>
+        importFiles: (payload: { courseName: string; folderPath: string[] }) => Promise<{
+          cancelled: boolean
+          vaultRoot?: string
+          items: { id: string; title: string; type: 'PPT' | 'PDF' | '视频' | '文件'; meta: string; path: string[]; localPath: string; deduplicated: boolean }[]
+        }>
+        onMigrationProgress: (listener: (progress: { completed: number; total: number; title: string }) => void) => () => void
+      }
+      knowledge: {
+        status: (payload: { documents: KnowledgeBuildDocument[] }) => Promise<KnowledgeIndexResult>
+        build: (payload: { documents: KnowledgeBuildDocument[] }) => Promise<KnowledgeIndexResult>
+        ocr: (payload: { documents: KnowledgeBuildDocument[]; materialId: string }) => Promise<KnowledgeIndexResult>
+        ocrBatch: (payload: { documents: KnowledgeBuildDocument[]; materialIds: string[] }) => Promise<KnowledgeIndexResult & { batch: { completed: number; failed: { materialId: string; error: string }[] } }>
+        refine: (payload: { documents: KnowledgeBuildDocument[]; materialId: string; force?: boolean }) => Promise<KnowledgeIndexResult>
+        refineBatch: (payload: { documents: KnowledgeBuildDocument[]; materialIds: string[] }) => Promise<KnowledgeIndexResult & { batch: { completed: number; failed: { materialId: string; error: string }[] } }>
+        documentContent: (payload: { documents: KnowledgeBuildDocument[]; materialId: string }) => Promise<{ materialId: string; title: string; courseName: string; format: string; text: string; textLength: number }>
+        documentFile: (payload: { documents: KnowledgeBuildDocument[]; materialId: string }) => Promise<{ materialId: string; title: string; format: 'pdf' | 'docx' | 'pptx' | 'ppt' | 'unknown'; bytes: Uint8Array }>
+        onProgress: (listener: (progress: { completed: number; total: number; title: string }) => void) => () => void
+      }
+      ai: {
+        settings: () => Promise<{ configured: boolean; baseUrl: string; model: string }>
+        saveSettings: (payload: { baseUrl: string; model: string; apiKey?: string }) => Promise<{ configured: boolean; baseUrl: string; model: string }>
+        testConnection: (payload: { baseUrl: string; model: string; apiKey?: string }) => Promise<{ model: string; latencyMs: number }>
+        chat: (payload: { context: string; messages: { role: 'user' | 'assistant'; content: string }[] }) => Promise<{ content: string; model: string }>
+      }
+      credentials: {
+        blackboard: () => Promise<{ configured: boolean; username: string }>
+        saveBlackboard: (payload: { username: string; password?: string }) => Promise<{ configured: boolean; username: string }>
+        clearBlackboard: () => Promise<{ configured: boolean; username: string }>
+      }
+      blackboard: {
+        connect: () => Promise<{ started: boolean; portal: string }>
+        status: () => Promise<BlackboardStatus>
+        sync: () => Promise<BlackboardSyncResult>
+        syncMaterials: (courses: { name: string; url: string }[]) => Promise<BlackboardMaterialSyncResult>
+        openSubmission: (url: string) => Promise<{ opened: boolean }>
+        cacheFile: (payload: { url: string; title: string; courseName: string; folderPath: string[] }) => Promise<{
+          vaultRoot: string
+          item: { id: string; title: string; type: 'PPT' | 'PDF' | '视频' | '文件'; meta: string; path: string[]; localPath: string; deduplicated: boolean }
+        }>
+        cacheFiles: (payload: { files: { clientId?: string; url: string; title: string; courseName: string; folderPath: string[] }[] }) => Promise<{
+          completed: { clientId?: string; url: string; vaultRoot: string; item: { id: string; title: string; type: 'PPT' | 'PDF' | '视频' | '文件'; meta: string; path: string[]; localPath: string; deduplicated: boolean } }[]
+          failed: { url: string; title: string; error: string }[]
+        }>
+        disconnect: () => Promise<{ connected: boolean }>
+        onConnectionChanged: (listener: (status: BlackboardStatus) => void) => () => void
+      }
+      gradescope: {
+        connect: () => Promise<{ started: boolean; portal: string }>
+        status: () => Promise<BlackboardStatus>
+        sync: () => Promise<GradescopeSyncResult>
+        openSubmission: (url: string) => Promise<{ opened: boolean }>
+        disconnect: () => Promise<{ connected: boolean }>
+        onConnectionChanged: (listener: (status: BlackboardStatus) => void) => () => void
+      }
+    }
+  }
+}
+
+export {}
