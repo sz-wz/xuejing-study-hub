@@ -35,6 +35,10 @@ describe('DDL 状态', () => {
   })
 
   it('可将 ISO 截止时间转为编辑器需要的本地日期时间', () => {
-    expect(toDateTimeLocalValue('2026-07-12T16:30:00+08:00')).toMatch(/^2026-07-12T16:30$/)
+    const source = '2026-07-12T16:30:00+08:00'
+    const localValue = toDateTimeLocalValue(source)
+
+    expect(localValue).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)
+    expect(new Date(localValue).getTime()).toBe(new Date(source).getTime())
   })
 })
