@@ -11,7 +11,7 @@
     "start": "electron .",
     "typecheck": "tsc -b",
     "test": "vitest run && node --test electron/blackboard-portal.nodecheck.cjs electron/gradescope-portal.nodecheck.cjs electron/vault.nodecheck.cjs electron/knowledge.nodecheck.cjs electron/ocr.nodecheck.cjs electron/cloud-knowledge.nodecheck.cjs electron/renderer-events.nodecheck.cjs electron/document-preview.nodecheck.cjs electron/assignment-analysis.nodecheck.cjs electron/app-preferences.nodecheck.cjs electron/tray-icon.nodecheck.cjs electron/email-notifications.nodecheck.cjs",
-    "package:win": "node electron/create-brand-assets.cjs && npm run build && electron-builder --win nsis --x64"
+    "package:win": "node electron/create-brand-assets.cjs && npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.100",
