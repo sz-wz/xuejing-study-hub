@@ -2,9 +2,9 @@
 
 ## 当前版本
 
-- 源码版本：`0.3.7`
+- 源码版本：`1.0.0`
 - 当前免安装构建：`release/win-unpacked/学径.exe`
-- 当前安装包：`release/学径-0.3.7-win-x64.exe`
+- 当前安装包：`release/学径-1.0.0-win-x64.exe`
 - 版本号需要同时更新 `package.json`、`package-lock.json`、`electron/preload.cjs`、`README.md`、`PRODUCT.md` 和 `docs/PROGRESS.md`。
 
 ## 目录约定
@@ -33,5 +33,5 @@ npm run package:win
 ## GitHub 发布
 
 - 普通提交和 Pull Request 会运行 `.github/workflows/ci.yml`。
-- 推送形如 `v0.3.7` 的标签后，`.github/workflows/release.yml` 会在 Windows 环境重新测试、打包并创建 GitHub Release。
+- 推送形如 `v1.0.0` 的标签后，`.github/workflows/release.yml` 会在 Windows 环境重新测试、打包并创建 GitHub Release。
 - Git 仓库只保存源码、测试和文档；历史 `.exe`、解压目录、`node_modules` 和 `dist` 不上传。
