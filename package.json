@@ -43,7 +43,7 @@
   "build": {
     "appId": "com.xuejing.studyhub",
     "productName": "学径",
-    "artifactName": "学径-${version}-win-x64.${ext}",
+    "artifactName": "Xuejing-${version}-win-x64.${ext}",
     "directories": {
       "output": "release"
     },

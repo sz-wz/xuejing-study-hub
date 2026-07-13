@@ -4,7 +4,7 @@
 
 - 源码版本：`1.0.0`
 - 当前免安装构建：`release/win-unpacked/学径.exe`
-- 当前安装包：`release/学径-1.0.0-win-x64.exe`
+- 当前安装包：`release/Xuejing-1.0.0-win-x64.exe`
 - 版本号需要同时更新 `package.json`、`package-lock.json`、`electron/preload.cjs`、`README.md`、`PRODUCT.md` 和 `docs/PROGRESS.md`。
 
 ## 目录约定

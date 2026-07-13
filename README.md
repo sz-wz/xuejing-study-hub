@@ -68,7 +68,7 @@ npm run build
 npm run package:win
 ```
 
-安装包输出到 `release/学径-<版本号>-win-x64.exe`。开发和测试数据保存在当前 Windows 用户的应用数据目录与用户自行选择的资料库中。
+安装包输出到 `release/Xuejing-<版本号>-win-x64.exe`。开发和测试数据保存在当前 Windows 用户的应用数据目录与用户自行选择的资料库中。
 
 ## 文档导航
 
