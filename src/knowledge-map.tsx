@@ -1,5 +1,6 @@
 import { Minus, Move, Plus, RotateCcw, Search } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { conceptEvidenceLabels, type ConceptEvidence } from './concept-evidence'
 
 export type MapDocument = {
   materialId: string
@@ -101,7 +102,13 @@ function buildLegacyKnowledgeMap(documents: MapDocument[], concepts: MapConcept[
   return { nodes, edges, nodeById, bounds: { width: 850 + Math.max(1, 5) * 220 + 180, height: Math.max(620, offsetY) } }
 }
 
-function buildKnowledgeMap(documents: MapDocument[], concepts: MapConcept[], focusConceptId: string | null): KnowledgeMapData {
+export function prioritizeMapConcepts(concepts: MapConcept[], ratings: Record<string, Rating>, evidence: Record<string, ConceptEvidence> = {}) {
+  const order: Record<Rating, number> = { 0: 2, 1: 0, 2: 1, 3: 3, 4: 4 }
+  const evidenceOrder = { conflict: 0, test_weak: 1, self_weak: 2, unassessed: 3, developing: 4, verified: 5 }
+  return [...concepts].sort((left, right) => (evidence[left.id] ? evidenceOrder[evidence[left.id].status] : order[ratings[left.id] ?? 0]) - (evidence[right.id] ? evidenceOrder[evidence[right.id].status] : order[ratings[right.id] ?? 0]) || right.sourceIds.length - left.sourceIds.length || left.title.localeCompare(right.title, 'zh-CN'))
+}
+
+export function buildKnowledgeMap(documents: MapDocument[], concepts: MapConcept[], focusConceptId: string | null, overviewOnly = false): KnowledgeMapData {
   const parsedDocuments = documents.filter((document) => document.status === 'parsed' || document.status === 'ocr').sort((left, right) => left.courseName.localeCompare(right.courseName, 'zh-CN') || left.title.localeCompare(right.title, 'zh-CN', { numeric: true }))
   const nodes: MapNode[] = []
   const edges: MapEdge[] = []
@@ -109,7 +116,7 @@ function buildKnowledgeMap(documents: MapDocument[], concepts: MapConcept[], foc
   if (focusConceptId) {
     const concept = concepts.find((item) => item.id === focusConceptId)
     if (concept) {
-      const sourceDocuments = parsedDocuments.filter((document) => concept.sourceIds.includes(document.materialId))
+      const sourceDocuments = parsedDocuments.filter((document) => concept.sourceIds.includes(document.materialId)).slice(0, 12)
       const centerId = `course-concept:${concept.id}`
       nodes.push({ id: centerId, kind: 'courseConcept', title: concept.title, subtitle: `${sourceDocuments.length} 份来源资料 · 点击“返回概览”可浏览其它主题`, x: 480, y: 340, radius: 28, courseId: concept.courseIds[0], conceptId: concept.id })
       sourceDocuments.forEach((document, index) => {
@@ -120,7 +127,7 @@ function buildKnowledgeMap(documents: MapDocument[], concepts: MapConcept[], foc
         const documentId = `document:${document.materialId}`
         nodes.push({ id: documentId, kind: 'document', title: document.title, subtitle: '该主题的来源资料', x, y, radius: 17, courseId: document.courseId, documentId: document.materialId })
         edges.push({ from: centerId, to: documentId, kind: 'maps' })
-        const themes = documentConcepts(document).filter((title) => normalized(title) !== normalized(concept.title)).slice(0, 5)
+        const themes = documentConcepts(document).filter((title) => normalized(title) !== normalized(concept.title)).slice(0, 3)
         themes.forEach((title, themeIndex) => {
           const childAngle = angle + (themeIndex - (themes.length - 1) / 2) * .38
           const childId = `document-concept:${document.materialId}:${themeIndex}`
@@ -129,23 +136,32 @@ function buildKnowledgeMap(documents: MapDocument[], concepts: MapConcept[], foc
         })
       })
     }
-  } else {
+  } else if (overviewOnly) {
     const courses = [...new Map(parsedDocuments.map((document) => [document.courseId, document.courseName])).entries()]
     courses.forEach(([courseId, courseName], courseIndex) => {
       const courseConcepts = concepts.filter((concept) => concept.courseIds.includes(courseId))
       const column = courseIndex % 3
       const row = Math.floor(courseIndex / 3)
-      const centerX = 360 + column * 900
-      const centerY = 330 + row * 820
+      const centerX = 230 + column * 330
+      const centerY = 180 + row * 250
       const courseIdNode = `course:${courseId}`
-      nodes.push({ id: courseIdNode, kind: 'course', title: courseName, subtitle: `${parsedDocuments.filter((document) => document.courseId === courseId).length} 份资料 · ${courseConcepts.length} 个主题`, x: centerX, y: centerY, radius: 31, courseId })
-      courseConcepts.forEach((concept, index) => {
-        const ring = Math.floor(index / 22)
-        const ringSize = Math.min(22, Math.max(1, courseConcepts.length - ring * 22))
-        const angle = (Math.PI * 2 * (index % 22)) / ringSize - Math.PI / 2 + ring * .15
-        const radius = 120 + ring * 75
-        nodes.push({ id: `course-concept:${concept.id}`, kind: 'courseConcept', title: concept.title, subtitle: `${concept.sourceIds.length} 份资料来源 · 点击展开局部溯源`, x: centerX + Math.cos(angle) * radius, y: centerY + Math.sin(angle) * radius, radius: 11, courseId, conceptId: concept.id })
-      })
+      nodes.push({ id: courseIdNode, kind: 'course', title: courseName, subtitle: `${parsedDocuments.filter((document) => document.courseId === courseId).length} 份资料 · ${courseConcepts.length} 个主题 · 点击进入`, x: centerX, y: centerY, radius: 36, courseId })
+    })
+  } else {
+    const [courseId, courseName] = [...new Map(parsedDocuments.map((document) => [document.courseId, document.courseName])).entries()][0] ?? ['', '当前课程']
+    const centerX = 500
+    const centerY = 390
+    const courseIdNode = `course:${courseId}`
+    nodes.push({ id: courseIdNode, kind: 'course', title: courseName, subtitle: `${parsedDocuments.length} 份资料 · 当前显示 ${concepts.length} 个主题`, x: centerX, y: centerY, radius: 34, courseId })
+    concepts.forEach((concept, index) => {
+      const ring = index < 8 ? 0 : index < 20 ? 1 : 2
+      const start = ring === 0 ? 0 : ring === 1 ? 8 : 20
+      const ringCount = ring === 0 ? Math.min(8, concepts.length) : ring === 1 ? Math.min(12, Math.max(0, concepts.length - 8)) : Math.max(1, concepts.length - 20)
+      const angle = (Math.PI * 2 * (index - start)) / Math.max(1, ringCount) - Math.PI / 2 + ring * .12
+      const radius = 145 + ring * 105
+      const nodeId = `course-concept:${concept.id}`
+      nodes.push({ id: nodeId, kind: 'courseConcept', title: concept.title, subtitle: `${concept.sourceIds.length} 份资料来源 · 点击展开局部溯源`, x: centerX + Math.cos(angle) * radius, y: centerY + Math.sin(angle) * radius, radius: 12, courseId, conceptId: concept.id })
+      edges.push({ from: courseIdNode, to: nodeId, kind: 'contains' })
     })
   }
   const nodeById = new Map(nodes.map((node) => [node.id, node]))
@@ -154,10 +170,12 @@ function buildKnowledgeMap(documents: MapDocument[], concepts: MapConcept[], foc
   return { nodes, edges, nodeById, bounds: { width: Math.max(960, maxX), height: Math.max(680, maxY) } }
 }
 
-function nodeColor(node: MapNode, ratings: Record<string, Rating>) {
+function nodeColor(node: MapNode, ratings: Record<string, Rating>, evidence: Record<string, ConceptEvidence>) {
   if (node.kind === 'course') return palette[Math.abs([...node.courseId ?? ''].reduce((sum, value) => sum + value.charCodeAt(0), 0)) % palette.length]
   if (node.kind === 'document') return '#c97b61'
   if (node.kind === 'documentConcept') return '#d4ab48'
+  const status = node.conceptId ? evidence[node.conceptId]?.status : undefined
+  if (status) return { unassessed: '#9ba9a0', self_weak: '#d38a58', test_weak: '#d45f5f', conflict: '#9a63b1', verified: '#4f9a6c', developing: '#6788b5' }[status]
   const rating = node.conceptId ? ratings[node.conceptId] ?? 0 : 0
   return ['#9ba9a0', '#c87a61', '#c6a04b', '#5f9b73', '#6586b7'][rating]
 }
@@ -172,9 +190,9 @@ function initialView(canvas: HTMLCanvasElement, bounds: KnowledgeMapData['bounds
   return { x: padding / 2, y: padding / 2, scale }
 }
 
-type CanvasProps = { data: KnowledgeMapData; ratings: Record<string, Rating>; selectedId: string | null; onSelect: (id: string) => void }
+type CanvasProps = { data: KnowledgeMapData; ratings: Record<string, Rating>; evidence: Record<string, ConceptEvidence>; selectedId: string | null; onSelect: (id: string) => void }
 
-function MapCanvas({ data, ratings, selectedId, onSelect }: CanvasProps) {
+function MapCanvas({ data, ratings, evidence, selectedId, onSelect }: CanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const viewRef = useRef({ x: 28, y: 28, scale: 0.45 })
   const pointerRef = useRef<{ x: number; y: number; moved: boolean } | null>(null)
@@ -222,11 +240,17 @@ function MapCanvas({ data, ratings, selectedId, onSelect }: CanvasProps) {
       if (!visible(node)) continue
       const selected = node.id === selectedId
       context.beginPath()
-      context.fillStyle = nodeColor(node, ratings)
+      context.fillStyle = nodeColor(node, ratings, evidence)
       context.globalAlpha = node.kind === 'documentConcept' ? 0.78 : 1
       context.arc(node.x, node.y, node.radius + (selected ? 3 : 0), 0, Math.PI * 2)
       context.fill()
       context.globalAlpha = 1
+      const conceptEvidence = node.conceptId ? evidence[node.conceptId] : undefined
+      if (node.kind === 'courseConcept' && conceptEvidence?.latestTestScore !== null && conceptEvidence?.latestTestScore !== undefined) {
+        context.strokeStyle = conceptEvidence.latestTestScore >= 80 ? '#276b48' : conceptEvidence.latestTestScore < 70 ? '#8f3030' : '#465f87'
+        context.lineWidth = Math.max(1, 2 / view.scale)
+        context.stroke()
+      }
       if (selected) {
         context.strokeStyle = '#13271e'
         context.lineWidth = Math.max(1.5, 2.5 / view.scale)
@@ -239,7 +263,7 @@ function MapCanvas({ data, ratings, selectedId, onSelect }: CanvasProps) {
       }
     }
     context.restore()
-  }, [data, ratings, selectedId])
+  }, [data, evidence, ratings, selectedId])
 
   const requestDraw = useCallback(() => {
     if (drawFrameRef.current !== null) return
@@ -291,14 +315,19 @@ function MapCanvas({ data, ratings, selectedId, onSelect }: CanvasProps) {
   </div>
 }
 
-export function KnowledgeMap({ documents, concepts, ratings, courseFilter, onCourseFilterChange, onOpenDocument }: { documents: MapDocument[]; concepts: MapConcept[]; ratings: Record<string, Rating>; courseFilter: string; onCourseFilterChange: (value: string) => void; onOpenDocument: (documentId: string, courseId: string) => void }) {
+export function KnowledgeMap({ documents, concepts, ratings, evidence, courseFilter, onCourseFilterChange, onOpenDocument, onReviewConcept }: { documents: MapDocument[]; concepts: MapConcept[]; ratings: Record<string, Rating>; evidence: Record<string, ConceptEvidence>; courseFilter: string; onCourseFilterChange: (value: string) => void; onOpenDocument: (documentId: string, courseId: string) => void; onReviewConcept: (conceptId: string, courseId: string) => void }) {
   const courseOptions = useMemo(() => [...new Map(documents.map((document) => [document.courseId, document.courseName])).entries()].sort((left, right) => left[1].localeCompare(right[1], 'zh-CN')), [documents])
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [focusConceptId, setFocusConceptId] = useState<string | null>(null)
+  const [conceptPage, setConceptPage] = useState(0)
   const filteredDocuments = useMemo(() => documents.filter((document) => courseFilter === 'all' || document.courseId === courseFilter), [courseFilter, documents])
   const filteredConcepts = useMemo(() => concepts.filter((concept) => courseFilter === 'all' || concept.courseIds.includes(courseFilter)), [concepts, courseFilter])
-  const data = useMemo(() => buildKnowledgeMap(filteredDocuments, filteredConcepts, focusConceptId), [filteredConcepts, filteredDocuments, focusConceptId])
+  const prioritizedConcepts = useMemo(() => prioritizeMapConcepts(filteredConcepts, ratings, evidence), [evidence, filteredConcepts, ratings])
+  const pageSize = 24
+  const pageCount = Math.max(1, Math.ceil(prioritizedConcepts.length / pageSize))
+  const visibleConcepts = courseFilter === 'all' || focusConceptId ? filteredConcepts : prioritizedConcepts.slice(conceptPage * pageSize, (conceptPage + 1) * pageSize)
+  const data = useMemo(() => buildKnowledgeMap(filteredDocuments, visibleConcepts, focusConceptId, courseFilter === 'all'), [courseFilter, filteredDocuments, focusConceptId, visibleConcepts])
   const selected = selectedId ? data.nodeById.get(selectedId) : undefined
   const matches = useMemo(() => {
     const text = normalized(query)
@@ -306,9 +335,13 @@ export function KnowledgeMap({ documents, concepts, ratings, courseFilter, onCou
     return filteredConcepts.filter((concept) => normalized(concept.title).includes(text)).slice(0, 8).map((concept) => ({ id: `course-concept:${concept.id}`, title: concept.title, kind: 'courseConcept' as const, conceptId: concept.id }))
   }, [filteredConcepts, query])
 
-  useEffect(() => { setSelectedId(null); setFocusConceptId(null); setQuery('') }, [courseFilter])
+  useEffect(() => { setSelectedId(null); setFocusConceptId(null); setQuery(''); setConceptPage(0) }, [courseFilter])
   const selectNode = (id: string) => {
     const node = data.nodeById.get(id)
+    if (node?.kind === 'course' && node.courseId && courseFilter === 'all') {
+      onCourseFilterChange(node.courseId)
+      return
+    }
     if (node?.kind === 'courseConcept' && node.conceptId && !focusConceptId) {
       setFocusConceptId(node.conceptId)
       setSelectedId(`course-concept:${node.conceptId}`)
@@ -317,5 +350,6 @@ export function KnowledgeMap({ documents, concepts, ratings, courseFilter, onCou
     setSelectedId(id)
   }
 
-  return <div className="knowledge-map-layout"><div className="knowledge-map-toolbar"><label>范围<select value={courseFilter} onChange={(event) => onCourseFilterChange(event.target.value)}><option value="all">全部课程聚合</option>{courseOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label><label className="knowledge-map-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索课程知识点" />{matches.length ? <div>{matches.map((node) => <button key={node.id} onClick={() => { setFocusConceptId(node.conceptId); setSelectedId(node.id); setQuery('') }}>{node.title}<small>展开资料级来源</small></button>)}</div> : null}</label>{focusConceptId ? <button className="outline-button" onClick={() => { setFocusConceptId(null); setSelectedId(null) }}>返回课程概览</button> : <span>概览默认隐藏关系线，点击主题展开来源</span>}<span>{data.nodes.length} 个节点 · {data.edges.length} 条关系</span></div><div className="knowledge-map-workspace"><MapCanvas data={data} ratings={ratings} selectedId={selectedId} onSelect={selectNode} /><aside className="knowledge-map-inspector"><span className="eyebrow">节点详情</span>{selected ? <><i className={'map-kind ' + selected.kind}>{selected.kind === 'course' ? '课程' : selected.kind === 'document' ? '来源资料' : selected.kind === 'documentConcept' ? '资料级主题' : '课程主题'}</i><h2>{selected.title}</h2><p>{selected.subtitle}</p>{selected.conceptId ? <p>自评：{['未评估', '陌生', '模糊', '理解', '掌握'][ratings[selected.conceptId] ?? 0]}</p> : null}{selected.documentId && selected.courseId ? <button className="primary-button map-open-document" onClick={() => onOpenDocument(selected.documentId!, selected.courseId!)}>在学径中打开这份资料</button> : null}</> : <p>{focusConceptId ? '点击来源资料或资料级主题查看详情。这里仅显示当前主题的局部溯源关系。' : '这是课程主题概览。默认不画所有关系线；点击任一主题，展开它的来源资料与资料级主题。'}</p>}</aside></div></div>
+  const selectedEvidence = selected?.conceptId ? evidence[selected.conceptId] : undefined
+  return <div className="knowledge-map-layout"><div className="knowledge-map-toolbar"><label>范围<select value={courseFilter} onChange={(event) => onCourseFilterChange(event.target.value)}><option value="all">全部课程地图</option>{courseOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label><label className="knowledge-map-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索课程知识点" />{matches.length ? <div>{matches.map((node) => <button key={node.id} onClick={() => { setFocusConceptId(node.conceptId); setSelectedId(node.id); setQuery('') }}>{node.title}<small>展开资料级来源</small></button>)}</div> : null}</label>{focusConceptId ? <button className="outline-button" onClick={() => { setFocusConceptId(null); setSelectedId(null) }}>返回主题列表</button> : courseFilter !== 'all' ? <><button className="outline-button" onClick={() => onCourseFilterChange('all')}>返回全部课程</button>{pageCount > 1 ? <div className="knowledge-map-pages"><button disabled={conceptPage === 0} onClick={() => setConceptPage((page) => Math.max(0, page - 1))}>上一批</button><span>{conceptPage + 1}/{pageCount} · 每批最多 {pageSize} 个</span><button disabled={conceptPage >= pageCount - 1} onClick={() => setConceptPage((page) => Math.min(pageCount - 1, page + 1))}>下一批</button></div> : null}</> : <span>先选择课程，再逐层查看主题与来源</span>}<span>{data.nodes.length} 个可见节点 · {data.edges.length} 条关系</span></div><div className="knowledge-evidence-legend"><span className="unassessed">未形成证据</span><span className="self_weak">自评薄弱</span><span className="test_weak">测试薄弱</span><span className="conflict">自评与测试不一致</span><span className="verified">测试验证较好</span><small>有描边的知识点已经被快速测试覆盖</small></div><div className="knowledge-map-workspace"><MapCanvas data={data} ratings={ratings} evidence={evidence} selectedId={selectedId} onSelect={selectNode} /><aside className="knowledge-map-inspector"><span className="eyebrow">节点详情</span>{selected ? <><i className={'map-kind ' + selected.kind}>{selected.kind === 'course' ? '课程' : selected.kind === 'document' ? '来源资料' : selected.kind === 'documentConcept' ? '资料级主题' : '课程主题'}</i><h2>{selected.title}</h2><p>{selected.subtitle}</p>{selected.conceptId ? <div className="map-concept-evidence"><span className={`concept-evidence-status ${selectedEvidence?.status ?? 'unassessed'}`}>{conceptEvidenceLabels[selectedEvidence?.status ?? 'unassessed']}</span><p>主动自评：{['未评估', '陌生', '模糊', '理解', '掌握'][ratings[selected.conceptId] ?? 0]}</p><p>最近测试：{selectedEvidence?.latestTestScore === null || selectedEvidence?.latestTestScore === undefined ? '尚未覆盖' : `${selectedEvidence.latestTestScore}%（${selectedEvidence.latestTestCorrect}/${selectedEvidence.latestTestQuestions}）`}</p><p>最近复习：{selectedEvidence?.lastReviewedAt ? new Date(selectedEvidence.lastReviewedAt).toLocaleDateString() : '尚无记录'}</p>{selected.courseId ? <button className="outline-button" onClick={() => onReviewConcept(selected.conceptId!, courseFilter !== 'all' ? courseFilter : selected.courseId!)}>加入自选复习</button> : null}</div> : null}{selected.documentId && selected.courseId ? <button className="primary-button map-open-document" onClick={() => onOpenDocument(selected.documentId!, selected.courseId!)}>在学径中打开这份资料</button> : null}</> : <p>{focusConceptId ? '当前只显示一个主题及其来源资料。点击资料可以在学径中打开原文件。' : courseFilter === 'all' ? '全课程地图只显示课程入口，避免把上千个节点堆在一起。点击课程进入它的主题地图。' : `当前课程共 ${filteredConcepts.length} 个主题，每批最多显示 ${pageSize} 个。薄弱、矛盾和来源较多的主题优先。`}</p>}</aside></div></div>
 }

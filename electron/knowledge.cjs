@@ -645,4 +645,34 @@ async function readKnowledgeDocumentContent({ root, documents, materialId }) {
   }
 }
 
-module.exports = { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, ocrKnowledgeDocument, ocrKnowledgeDocuments, refineKnowledgeDocument, refineKnowledgeDocuments, readKnowledgeDocumentContent, toConceptTitle }
+async function searchKnowledgeDocuments({ root, documents, query, limit = 20 }) {
+  const textQuery = typeof query === 'string' ? query.replace(/\s+/g, ' ').trim().slice(0, 120) : ''
+  if (textQuery.length < 2) return []
+  const normalizedQuery = textQuery.toLocaleLowerCase()
+  const tokens = normalizedQuery.split(' ').filter(Boolean)
+  const index = await readKnowledgeIndex(root)
+  const results = []
+  for (const document of Array.isArray(documents) ? documents : []) {
+    const record = index.documents[document.materialId]
+    if (!record || !['parsed', 'ocr'].includes(record.status) || !record.text?.trim()) continue
+    const searchable = `${document.title}\n${record.text}`.replace(/\s+/g, ' ').trim()
+    const normalized = searchable.toLocaleLowerCase()
+    if (!tokens.every((token) => normalized.includes(token))) continue
+    const title = document.title.toLocaleLowerCase()
+    const score = title === normalizedQuery ? 120 : title.startsWith(normalizedQuery) ? 100 : title.includes(normalizedQuery) ? 80 : 50
+    const position = Math.max(0, normalized.indexOf(tokens[0]))
+    const start = Math.max(0, position - 70)
+    const end = Math.min(searchable.length, position + Math.max(tokens[0].length, 20) + 110)
+    results.push({
+      materialId: document.materialId,
+      title: document.title,
+      courseId: document.courseId,
+      courseName: document.courseName,
+      snippet: `${start > 0 ? '…' : ''}${searchable.slice(start, end)}${end < searchable.length ? '…' : ''}`,
+      score,
+    })
+  }
+  return results.sort((left, right) => right.score - left.score || left.title.localeCompare(right.title, 'zh-CN')).slice(0, Math.max(1, Math.min(50, Number(limit) || 20)))
+}
+
+module.exports = { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, ocrKnowledgeDocument, ocrKnowledgeDocuments, refineKnowledgeDocument, refineKnowledgeDocuments, readKnowledgeDocumentContent, searchKnowledgeDocuments, toConceptTitle }

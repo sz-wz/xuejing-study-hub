@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Notification, safeStorage, session, shell } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, safeStorage, session, shell, Tray } = require('electron')
 const path = require('path')
 const fs = require('fs/promises')
 const { classifyBlackboardPage, parseCourseLinks } = require('./blackboard-portal.cjs')
@@ -8,10 +8,13 @@ const { parseBlackboardAssignmentDetails } = require('./blackboard-assignment.cj
 const { extractAssignmentText } = require('./assignment-analysis.cjs')
 const { GRADESCOPE_ORIGIN, classifyGradescopePage, hasGradescopeSessionCookie, isGradescopeAuthenticatedPage, parseGradescopeAssignments, parseGradescopeCourses } = require('./gradescope-portal.cjs')
 const { findBlackboardCachedFiles, importAssignmentFilesToVault, importBufferToVault, importFilesToVault, migrateVault, removeAssignmentFilesFromVault, repairVaultExtensions, verifyVaultFiles } = require('./vault.cjs')
-const { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, ocrKnowledgeDocument, ocrKnowledgeDocuments, refineKnowledgeDocument, refineKnowledgeDocuments, readKnowledgeDocumentContent } = require('./knowledge.cjs')
+const { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, ocrKnowledgeDocument, ocrKnowledgeDocuments, refineKnowledgeDocument, refineKnowledgeDocuments, readKnowledgeDocumentContent, searchKnowledgeDocuments } = require('./knowledge.cjs')
 const { findPreviewDocument, readPreviewFile } = require('./document-preview.cjs')
 const { refineKnowledgeWithCloud, testCloudConnection, chatWithCloud } = require('./cloud-knowledge.cjs')
 const { sendToRenderer } = require('./renderer-events.cjs')
+const { normalizeAppBehavior } = require('./app-preferences.cjs')
+const { createTrayIconPng } = require('./tray-icon.cjs')
+const { buildDeadlineDigestMessage, buildDeadlineMessage, buildSyncUpdateMessage, normalizeEmailSettings, publicEmailSettings, sendMail, testEmailConnection, validateEmailSettings } = require('./email-notifications.cjs')
 
 const isDev = !app.isPackaged
 const BLACKBOARD_ORIGIN = 'https://elearning.shanghaitech.edu.cn:8443'
@@ -28,6 +31,9 @@ let gradescopeLoginWindow
 let blackboardConnected = false
 let gradescopeConnected = false
 let gradescopeSessionKnownInvalid = false
+let tray
+let isQuitting = false
+let appBehavior = normalizeAppBehavior()
 
 function getBlackboardSession() {
   return session.fromPartition(BLACKBOARD_PARTITION)
@@ -57,6 +63,47 @@ async function readSettings() {
 async function writeSettings(settings) {
   await fs.mkdir(path.dirname(settingsPath()), { recursive: true })
   await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2), 'utf8')
+}
+
+async function appBehaviorSettings() {
+  const settings = await readSettings()
+  return normalizeAppBehavior(settings.appBehavior)
+}
+
+function trayIcon() {
+  return nativeImage.createFromBuffer(createTrayIconPng()).resize({ width: 16, height: 16 })
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return createWindow()
+  mainWindow.show()
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.focus()
+}
+
+function syncTray() {
+  if (!appBehavior.keepRunningInTray) {
+    tray?.destroy()
+    tray = undefined
+    return
+  }
+  if (tray) return
+  tray = new Tray(trayIcon())
+  tray.setToolTip('学径')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开学径', click: showMainWindow },
+    { type: 'separator' },
+    { label: '退出', click: () => { isQuitting = true; app.quit() } },
+  ]))
+  tray.on('double-click', showMainWindow)
+}
+
+async function saveAppBehavior(payload) {
+  appBehavior = normalizeAppBehavior(payload)
+  const existing = await readSettings()
+  await writeSettings({ ...existing, appBehavior })
+  syncTray()
+  return appBehavior
 }
 
 async function vaultSettings() {
@@ -90,6 +137,59 @@ function publicAiSettings(settings) {
 
 async function aiSettings() {
   return publicAiSettings(await readSettings())
+}
+
+async function emailSettings() {
+  const settings = await readSettings()
+  return publicEmailSettings(settings.email)
+}
+
+async function saveEmailSettings(payload) {
+  const existing = await readSettings()
+  const current = normalizeEmailSettings(existing.email)
+  const next = normalizeEmailSettings({ ...current, ...payload })
+  const suppliedPassword = typeof payload?.password === 'string' ? payload.password : ''
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储不可用，无法保存邮箱密码')
+  const encryptedPassword = suppliedPassword ? safeStorage.encryptString(suppliedPassword).toString('base64') : current.encryptedPassword
+  validateEmailSettings({ ...next, encryptedPassword }, true)
+  const stored = { ...next, encryptedPassword }
+  delete stored.password
+  await writeSettings({ ...existing, email: stored })
+  return publicEmailSettings(stored)
+}
+
+async function privateEmailSettings(payload = {}) {
+  const settings = await readSettings()
+  const saved = normalizeEmailSettings(settings.email)
+  const merged = normalizeEmailSettings({ ...saved, ...payload })
+  const suppliedPassword = typeof payload?.password === 'string' ? payload.password : ''
+  const encryptedPassword = saved.encryptedPassword
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储不可用，无法读取邮箱密码')
+  const password = suppliedPassword || (encryptedPassword ? safeStorage.decryptString(Buffer.from(encryptedPassword, 'base64')) : '')
+  return validateEmailSettings({ ...merged, password }, true)
+}
+
+async function sendSyncUpdateEmail(payload) {
+  const publicSettings = await emailSettings()
+  if (!publicSettings.enabled || !publicSettings.configured || !publicSettings.notifyCourseUpdates) return { sent: false, skipped: true }
+  const settings = await privateEmailSettings()
+  const message = buildSyncUpdateMessage(payload?.events)
+  if (!message.count) return { sent: false, skipped: true }
+  return sendMail(settings, message)
+}
+
+async function sendDeadlineEmail(payload) {
+  const publicSettings = await emailSettings()
+  if (!publicSettings.enabled || !publicSettings.configured || !publicSettings.notifyDeadlines) return { sent: false, skipped: true }
+  const settings = await privateEmailSettings()
+  return sendMail(settings, buildDeadlineMessage(payload))
+}
+
+async function sendDeadlineDigestEmail(payload) {
+  const publicSettings = await emailSettings()
+  if (!publicSettings.enabled || !publicSettings.configured || !publicSettings.notifyDeadlines) return { sent: false, skipped: true }
+  const settings = await privateEmailSettings()
+  return sendMail(settings, buildDeadlineDigestMessage(payload?.items))
 }
 
 async function saveAiSettings(payload) {
@@ -533,9 +633,16 @@ async function removeAssignmentFiles(payload) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1440, height: 920, minWidth: 1080, minHeight: 720, backgroundColor: '#f6f7f3', autoHideMenuBar: true,
-    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false },
+    width: 1440, height: 920, minWidth: 1080, minHeight: 720, backgroundColor: '#f6f7f3', autoHideMenuBar: true, icon: trayIcon(),
+    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
   })
+  mainWindow.on('close', (event) => {
+    if (!isQuitting && appBehavior.keepRunningInTray) {
+      event.preventDefault()
+      mainWindow.hide()
+    }
+  })
+  mainWindow.on('closed', () => { mainWindow = undefined })
   if (isDev) mainWindow.loadURL('http://localhost:5173')
   else mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
 }
@@ -629,6 +736,11 @@ ipcMain.handle('knowledge:document-content', async (_event, payload) => {
   return readKnowledgeDocumentContent({ root: settings.vaultRoot, documents: knowledgeDocuments(payload), materialId: typeof payload?.materialId === 'string' ? payload.materialId : '' })
 })
 
+ipcMain.handle('knowledge:search', async (_event, payload) => {
+  const settings = await vaultSettings()
+  return searchKnowledgeDocuments({ root: settings.vaultRoot, documents: knowledgeDocuments(payload), query: typeof payload?.query === 'string' ? payload.query : '', limit: payload?.limit })
+})
+
 ipcMain.handle('knowledge:document-file', async (_event, payload) => {
   const document = findPreviewDocument(knowledgeDocuments(payload), typeof payload?.materialId === 'string' ? payload.materialId : '')
   if (!document) throw new Error('找不到需要预览的资料')
@@ -701,6 +813,12 @@ ipcMain.handle('ai:chat', async (_event, payload) => chatWithCloud({
   context: typeof payload?.context === 'string' ? payload.context : '',
   messages: Array.isArray(payload?.messages) ? payload.messages : [],
 }))
+ipcMain.handle('email:settings', async () => emailSettings())
+ipcMain.handle('email:save-settings', async (_event, payload) => saveEmailSettings(payload))
+ipcMain.handle('email:test', async (_event, payload) => testEmailConnection(await privateEmailSettings(payload)))
+ipcMain.handle('email:send-sync-update', async (_event, payload) => sendSyncUpdateEmail(payload))
+ipcMain.handle('email:send-deadline', async (_event, payload) => sendDeadlineEmail(payload))
+ipcMain.handle('email:send-deadline-digest', async (_event, payload) => sendDeadlineDigestEmail(payload))
 ipcMain.handle('credentials:blackboard', async () => blackboardCredentials())
 ipcMain.handle('credentials:save-blackboard', async (_event, payload) => saveBlackboardCredentials(payload))
 ipcMain.handle('credentials:clear-blackboard', async () => clearBlackboardCredentials())
@@ -785,6 +903,9 @@ ipcMain.handle('deadlines:notify', async (_event, payload) => {
   return { shown: true }
 })
 
+ipcMain.handle('app:settings', async () => appBehaviorSettings())
+ipcMain.handle('app:save-settings', async (_event, payload) => saveAppBehavior(payload))
+
 ipcMain.handle('blackboard:sync', async () => {
   const status = await blackboardStatus()
   if (!status.connected) return { connected: false, courses: [], message: '请先完成 Blackboard 登录', diagnostics: { stage: '未登录' } }
@@ -843,11 +964,15 @@ ipcMain.handle('gradescope:disconnect', async () => {
 })
 
 app.whenReady().then(async () => {
+  appBehavior = await appBehaviorSettings()
   await restoreGradescopeSession()
+  syncTray()
   createWindow()
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+  app.on('activate', showMainWindow)
 })
 
+app.on('before-quit', () => { isQuitting = true })
+
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  if (process.platform !== 'darwin' && !appBehavior.keepRunningInTray) app.quit()
 })

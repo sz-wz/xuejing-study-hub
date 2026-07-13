@@ -26,6 +26,13 @@ describe('Gradescope 导入', () => {
     expect(result.assignments[0]).toMatchObject({ status: 'submitted', manualStatus: 'completed' })
   })
 
+  it('课程同步不会覆盖学生设置的结课状态', () => {
+    const completed = { ...baseCourse, studyStatus: 'completed' as const, completedAt: '2026-07-13T08:00:00.000Z' }
+    const result = mergeGradescopeCourses([completed], [remoteCourse])
+
+    expect(result.courses[0]).toMatchObject({ sources: ['Blackboard', 'Gradescope'], studyStatus: 'completed', completedAt: '2026-07-13T08:00:00.000Z' })
+  })
+
   it('刷新同步时保留已读取的题目说明和手动知识点映射', () => {
     const courseResult = mergeGradescopeCourses([baseCourse], [remoteCourse])
     const initial = mergeGradescopeAssignments([], courseResult.courses, [remoteAssignment]).assignments[0]

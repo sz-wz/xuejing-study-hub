@@ -7,6 +7,8 @@ export type Course = {
   instructor: string
   color: string
   sources: Source[]
+  studyStatus?: 'active' | 'completed'
+  completedAt?: string
 }
 
 export type TaskStatus = '待开始' | '进行中' | '已提交'

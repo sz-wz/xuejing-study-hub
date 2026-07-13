@@ -74,6 +74,11 @@ declare global {
     xuejing?: {
       platform: string
       version: string
+      app: {
+        settings: () => Promise<{ keepRunningInTray: boolean }>
+        saveSettings: (payload: { keepRunningInTray: boolean }) => Promise<{ keepRunningInTray: boolean }>
+        setZoomFactor: (factor: number) => number
+      }
       external: {
         openUrl: (url: string) => Promise<{ opened: boolean }>
       }
@@ -118,6 +123,7 @@ declare global {
         refine: (payload: { documents: KnowledgeBuildDocument[]; materialId: string; force?: boolean }) => Promise<KnowledgeIndexResult>
         refineBatch: (payload: { documents: KnowledgeBuildDocument[]; materialIds: string[] }) => Promise<KnowledgeIndexResult & { batch: { completed: number; failed: { materialId: string; error: string }[] } }>
         documentContent: (payload: { documents: KnowledgeBuildDocument[]; materialId: string }) => Promise<{ materialId: string; title: string; courseName: string; format: string; text: string; textLength: number }>
+        search: (payload: { documents: KnowledgeBuildDocument[]; query: string; limit?: number }) => Promise<{ materialId: string; title: string; courseId: string; courseName: string; snippet: string; score: number }[]>
         documentFile: (payload: { documents: KnowledgeBuildDocument[]; materialId: string }) => Promise<{ materialId: string; title: string; format: 'pdf' | 'docx' | 'pptx' | 'ppt' | 'unknown'; bytes: Uint8Array }>
         onProgress: (listener: (progress: { completed: number; total: number; title: string }) => void) => () => void
       }
@@ -126,6 +132,14 @@ declare global {
         saveSettings: (payload: { baseUrl: string; model: string; apiKey?: string }) => Promise<{ configured: boolean; baseUrl: string; model: string }>
         testConnection: (payload: { baseUrl: string; model: string; apiKey?: string }) => Promise<{ model: string; latencyMs: number }>
         chat: (payload: { context: string; messages: { role: 'user' | 'assistant'; content: string }[] }) => Promise<{ content: string; model: string }>
+      }
+      email: {
+        settings: () => Promise<{ configured: boolean; enabled: boolean; host: string; port: number; secure: boolean; username: string; from: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean }>
+        saveSettings: (payload: { enabled: boolean; host: string; port: number; secure: boolean; username: string; from?: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean; password?: string }) => Promise<{ configured: boolean; enabled: boolean; host: string; port: number; secure: boolean; username: string; from: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean }>
+        test: (payload: { host: string; port: number; secure: boolean; username: string; from?: string; recipient: string; password?: string }) => Promise<{ sent: boolean; messageId: string; latencyMs: number }>
+        sendSyncUpdate: (payload: { events: { title: string; detail: string; source: string }[] }) => Promise<{ sent: boolean; skipped?: boolean; messageId?: string }>
+        sendDeadline: (payload: { course: string; title: string; deadline: string; label: string }) => Promise<{ sent: boolean; skipped?: boolean; messageId?: string }>
+        sendDeadlineDigest: (payload: { items: { course: string; title: string; deadline: string; label: string }[] }) => Promise<{ sent: boolean; skipped?: boolean; messageId?: string }>
       }
       credentials: {
         blackboard: () => Promise<{ configured: boolean; username: string }>

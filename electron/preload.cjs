@@ -1,8 +1,13 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webFrame } = require('electron')
 
 contextBridge.exposeInMainWorld('xuejing', {
   platform: process.platform,
-  version: '0.3.7',
+  version: '1.0.0',
+  app: {
+    settings: () => ipcRenderer.invoke('app:settings'),
+    saveSettings: (payload) => ipcRenderer.invoke('app:save-settings', payload),
+    setZoomFactor: (factor) => { webFrame.setZoomFactor(factor); return factor },
+  },
   external: {
     openUrl: (url) => ipcRenderer.invoke('external:open-url', url),
   },
@@ -40,6 +45,7 @@ contextBridge.exposeInMainWorld('xuejing', {
     refine: (payload) => ipcRenderer.invoke('knowledge:refine', payload),
     refineBatch: (payload) => ipcRenderer.invoke('knowledge:refine-batch', payload),
     documentContent: (payload) => ipcRenderer.invoke('knowledge:document-content', payload),
+    search: (payload) => ipcRenderer.invoke('knowledge:search', payload),
     documentFile: (payload) => ipcRenderer.invoke('knowledge:document-file', payload),
     onProgress: (listener) => {
       const callback = (_event, progress) => listener(progress)
@@ -52,6 +58,14 @@ contextBridge.exposeInMainWorld('xuejing', {
     saveSettings: (payload) => ipcRenderer.invoke('ai:save-settings', payload),
     testConnection: (payload) => ipcRenderer.invoke('ai:test-connection', payload),
     chat: (payload) => ipcRenderer.invoke('ai:chat', payload),
+  },
+  email: {
+    settings: () => ipcRenderer.invoke('email:settings'),
+    saveSettings: (payload) => ipcRenderer.invoke('email:save-settings', payload),
+    test: (payload) => ipcRenderer.invoke('email:test', payload),
+    sendSyncUpdate: (payload) => ipcRenderer.invoke('email:send-sync-update', payload),
+    sendDeadline: (payload) => ipcRenderer.invoke('email:send-deadline', payload),
+    sendDeadlineDigest: (payload) => ipcRenderer.invoke('email:send-deadline-digest', payload),
   },
   credentials: {
     blackboard: () => ipcRenderer.invoke('credentials:blackboard'),

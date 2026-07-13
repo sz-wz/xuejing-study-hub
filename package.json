@@ -1,8 +1,8 @@
 {
   "name": "xuejing-study-hub",
-  "version": "0.3.7",
+  "version": "1.0.0",
   "private": true,
-  "description": "本科生学习聚合与复习中枢（Windows MVP）",
+  "description": "本科生学习聚合与复习中枢（Windows 正式版）",
   "main": "electron/entry.cjs",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && electron .\"",
@@ -10,8 +10,8 @@
     "build": "tsc -b && vite build",
     "start": "electron .",
     "typecheck": "tsc -b",
-    "test": "vitest run && node --test electron/blackboard-portal.nodecheck.cjs electron/gradescope-portal.nodecheck.cjs electron/vault.nodecheck.cjs electron/knowledge.nodecheck.cjs electron/ocr.nodecheck.cjs electron/cloud-knowledge.nodecheck.cjs electron/renderer-events.nodecheck.cjs electron/document-preview.nodecheck.cjs electron/assignment-analysis.nodecheck.cjs",
-    "package:win": "npm run build && electron-builder --win nsis --x64"
+    "test": "vitest run && node --test electron/blackboard-portal.nodecheck.cjs electron/gradescope-portal.nodecheck.cjs electron/vault.nodecheck.cjs electron/knowledge.nodecheck.cjs electron/ocr.nodecheck.cjs electron/cloud-knowledge.nodecheck.cjs electron/renderer-events.nodecheck.cjs electron/document-preview.nodecheck.cjs electron/assignment-analysis.nodecheck.cjs electron/app-preferences.nodecheck.cjs electron/tray-icon.nodecheck.cjs electron/email-notifications.nodecheck.cjs",
+    "package:win": "node electron/create-brand-assets.cjs && npm run build && electron-builder --win nsis --x64"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.100",
@@ -22,6 +22,7 @@
     "docx-preview": "^0.4.0",
     "jszip": "^3.10.1",
     "lucide-react": "latest",
+    "nodemailer": "^9.0.3",
     "pdfjs-dist": "^4.10.38",
     "react": "latest",
     "react-dom": "latest",
@@ -52,6 +53,7 @@
       "package.json"
     ],
     "win": {
+      "icon": "build/icon.png",
       "target": [
         "nsis"
       ]

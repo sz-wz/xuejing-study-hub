@@ -5,7 +5,7 @@ const path = require('path')
 const test = require('node:test')
 const JSZip = require('jszip')
 const CFB = require('cfb')
-const { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, refineKnowledgeDocument } = require('./knowledge.cjs')
+const { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, refineKnowledgeDocument, searchKnowledgeDocuments } = require('./knowledge.cjs')
 
 function createPdf(text) {
   const content = `BT /F1 20 Tf 72 720 Td (${text.replace(/[()\\]/g, '\\$&')}) Tj ET`
@@ -28,6 +28,24 @@ function createPdf(text) {
   pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`
   return Buffer.from(pdf)
 }
+
+test('全局搜索只在本地知识索引中检索资料正文并返回上下文片段', async () => {
+  const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'xuejing-knowledge-search-'))
+  try {
+    const lecture = path.join(sandbox, 'lecture.tex')
+    await fs.writeFile(lecture, '\\section{State Space Model}\nThe controllability matrix determines whether every state can be reached.', 'utf8')
+    const documents = [{ materialId: 'control-lecture', courseId: 'ee-control', courseName: '控制理论', title: 'Lecture 4.tex', localPath: lecture, type: '文件' }]
+    await buildKnowledgeIndex({ root: sandbox, documents })
+
+    const results = await searchKnowledgeDocuments({ root: sandbox, documents, query: 'controllability matrix' })
+    assert.equal(results.length, 1)
+    assert.equal(results[0].materialId, 'control-lecture')
+    assert.match(results[0].snippet, /controllability matrix/i)
+    assert.deepEqual(await searchKnowledgeDocuments({ root: sandbox, documents, query: 'teacher email' }), [])
+  } finally {
+    await fs.rm(sandbox, { recursive: true, force: true })
+  }
+})
 
 test('从 PPTX 幻灯片构建本地知识条目与来源索引', async () => {
   const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'xuejing-knowledge-'))

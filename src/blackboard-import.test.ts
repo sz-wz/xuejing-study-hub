@@ -19,4 +19,11 @@ describe('mergeBlackboardCourses', () => {
       sources: ['Blackboard'],
     })
   })
+
+  it('再次同步不会覆盖学生设置的结课状态', () => {
+    const completed: Course[] = [{ ...existing[0], sources: ['手动添加', 'Blackboard'], studyStatus: 'completed', completedAt: '2026-07-13T08:00:00.000Z' }]
+    const result = mergeBlackboardCourses(completed, [{ name: '数学基础', url: 'https://elearning.example.edu/course/math101' }])
+
+    expect(result.courses[0]).toMatchObject({ studyStatus: 'completed', completedAt: '2026-07-13T08:00:00.000Z' })
+  })
 })
