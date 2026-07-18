@@ -13,6 +13,8 @@ function secret(value, max = 1024) {
 function normalizeEmailSettings(value) {
   const source = value && typeof value === 'object' ? value : {}
   const port = Number(source.port)
+  const digestHour = Number(source.syncDigestHour)
+  const syncEmailMode = ['important', 'daily', 'every_sync', 'off'].includes(source.syncEmailMode) ? source.syncEmailMode : source.notifyCourseUpdates === false ? 'off' : 'important'
   return {
     enabled: source.enabled === true,
     host: clean(source.host, 255),
@@ -21,7 +23,9 @@ function normalizeEmailSettings(value) {
     username: clean(source.username, 320),
     from: clean(source.from, 320),
     recipient: clean(source.recipient, 320),
-    notifyCourseUpdates: source.notifyCourseUpdates !== false,
+    notifyCourseUpdates: syncEmailMode !== 'off',
+    syncEmailMode,
+    syncDigestHour: Number.isInteger(digestHour) && digestHour >= 0 && digestHour <= 23 ? digestHour : 20,
     notifyDeadlines: source.notifyDeadlines !== false,
     encryptedPassword: clean(source.encryptedPassword, 8192),
     password: secret(source.password),
@@ -40,6 +44,8 @@ function publicEmailSettings(value) {
     from: settings.from,
     recipient: settings.recipient,
     notifyCourseUpdates: settings.notifyCourseUpdates,
+    syncEmailMode: settings.syncEmailMode,
+    syncDigestHour: settings.syncDigestHour,
     notifyDeadlines: settings.notifyDeadlines,
   }
 }
@@ -84,7 +90,7 @@ function escapeHtml(value) {
 
 function safeEvents(events) {
   if (!Array.isArray(events)) return []
-  return events.slice(0, 100).flatMap((item) => {
+  return events.slice(0, 500).flatMap((item) => {
     if (!item || typeof item !== 'object') return []
     const title = clean(item.title, 160)
     const detail = clean(item.detail, 1000)

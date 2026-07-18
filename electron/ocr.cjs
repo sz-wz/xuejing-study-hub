@@ -45,6 +45,7 @@ async function recognizePdf({ filePath, language = 'chi_sim+eng', cachePath, onP
     },
   })
   const pages = []
+  const segments = []
   try {
     for (let number = 1; number <= pageCount; number += 1) {
       onProgress?.({ completed: number - 1, total: pageCount, title: '正在识别第 ' + number + '/' + pageCount + ' 页' })
@@ -56,7 +57,10 @@ async function recognizePdf({ filePath, language = 'chi_sim+eng', cachePath, onP
       const image = await canvas.encode('png')
       const result = await worker.recognize(image)
       const text = String(result?.data?.text ?? '').trim()
-      if (text) pages.push(text)
+      if (text) {
+        pages.push(text)
+        segments.push({ page: number, text })
+      }
       if (pages.join('\n').length >= MAX_OCR_TEXT_LENGTH) break
     }
   } finally {
@@ -64,7 +68,7 @@ async function recognizePdf({ filePath, language = 'chi_sim+eng', cachePath, onP
   }
   const text = pages.join('\n').slice(0, MAX_OCR_TEXT_LENGTH)
   onProgress?.({ completed: pageCount, total: pageCount, title: '' })
-  return { text, pages: pages.length, totalPages: pdf.numPages, language, truncated: pdf.numPages > pageCount }
+  return { text, segments, pages: pages.length, totalPages: pdf.numPages, language, truncated: pdf.numPages > pageCount }
 }
 
 module.exports = { recognizePdf, ensureBundledLanguages, MAX_OCR_PAGES }

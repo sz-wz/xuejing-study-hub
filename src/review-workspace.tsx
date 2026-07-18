@@ -1,6 +1,7 @@
 import { Bot, Check, Clock3, ExternalLink, FileText, Maximize2, Minimize2, Pause, Play, RefreshCw, RotateCcw, Send, Sparkles, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { DocumentViewer } from './document-viewer'
+import { createPortal } from 'react-dom'
+import { DocumentViewer, type KnowledgeLocation } from './document-viewer'
 import { adaptiveQuestionCount, gradeQuickTest, parseQuickTest, type QuickTestRecord } from './quick-test'
 
 export type ReviewDocument = {
@@ -13,13 +14,15 @@ export type ReviewDocument = {
   status: string
   path?: string[]
   outline?: string[]
-  ai?: { concepts: { title: string; evidence: string }[] }
+  outlineLocations?: { title: string; locations: KnowledgeLocation[] }[]
+  ai?: { concepts: { title: string; evidence: string; locations?: KnowledgeLocation[] }[]; locationBatches?: number }
 }
 
-export type ReviewConcept = { id: string; title: string; sourceIds: string[]; courseIds: string[] }
+export type ReviewConcept = { id: string; title: string; sourceIds: string[]; courseIds: string[]; locations?: KnowledgeLocation[] }
 export type ReviewSelection = { materialIds: string[]; conceptIds: string[]; focus: string; mode?: 'smart' | 'manual' }
 export type MaterialAssessment = 1 | 2 | 3 | 4
-export type ReviewSession = { active: boolean; materialIds: string[]; conceptIds: string[]; activeDocumentId?: string; completedMaterialIds: string[]; materialAssessments?: Record<string, MaterialAssessment>; materialAssessmentAt?: Record<string, string>; quickTests?: QuickTestRecord[]; startedAt: string }
+export type MaterialReviewRecord = { materialId: string; assessment: MaterialAssessment; assessedAt: string }
+export type ReviewSession = { active: boolean; materialIds: string[]; conceptIds: string[]; activeDocumentId?: string; completedMaterialIds: string[]; materialAssessments?: Record<string, MaterialAssessment>; materialAssessmentAt?: Record<string, string>; materialReviewHistory?: MaterialReviewRecord[]; quickTests?: QuickTestRecord[]; startedAt: string }
 
 type Rating = 0 | 1 | 2 | 3 | 4
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
@@ -52,7 +55,13 @@ export function originalFilename(document?: ReviewDocument) {
 }
 
 export function recordMaterialAssessment(session: ReviewSession, materialId: string, assessment: MaterialAssessment, assessedAt = new Date().toISOString()): ReviewSession {
-  return { ...session, materialAssessments: { ...session.materialAssessments, [materialId]: assessment }, materialAssessmentAt: { ...session.materialAssessmentAt, [materialId]: assessedAt } }
+  const materialReviewHistory = [...(session.materialReviewHistory ?? [])]
+  const previous = materialReviewHistory.at(-1)
+  const elapsed = previous ? new Date(assessedAt).getTime() - new Date(previous.assessedAt).getTime() : Number.POSITIVE_INFINITY
+  const correction = previous?.materialId === materialId && Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= 10 * 60_000
+  if (correction) materialReviewHistory[materialReviewHistory.length - 1] = { materialId, assessment, assessedAt }
+  else materialReviewHistory.push({ materialId, assessment, assessedAt })
+  return { ...session, materialAssessments: { ...session.materialAssessments, [materialId]: assessment }, materialAssessmentAt: { ...session.materialAssessmentAt, [materialId]: assessedAt }, materialReviewHistory: materialReviewHistory.slice(-500) }
 }
 
 export function finishReviewSession(session: ReviewSession, materialId?: string, assessment?: MaterialAssessment, assessedAt = new Date().toISOString()): ReviewSession {
@@ -71,6 +80,7 @@ export function createReviewSession(materialIds: string[], conceptIds: string[],
     completedMaterialIds: [],
     materialAssessments: { ...(previous?.materialAssessments ?? {}) },
     materialAssessmentAt: { ...(previous?.materialAssessmentAt ?? {}) },
+    materialReviewHistory: [...(previous?.materialReviewHistory ?? [])],
     quickTests: [...(previous?.quickTests ?? [])],
     startedAt: new Date().toISOString(),
   }
@@ -177,6 +187,7 @@ type WorkspaceProps = {
 
 export function ReviewWorkspace({ courseName, documents, concepts, ratings, selection, session, onSelectionChange, onSessionChange, onRate, aiConfigured, onOpenAiSettings, focusMinutes, breakMinutes }: WorkspaceProps) {
   const sessionRef = useRef<ReviewSession | null>(session)
+  const chatInputRef = useRef<HTMLTextAreaElement>(null)
   const [mode, setMode] = useState<'smart' | 'manual'>(selection.mode ?? 'smart')
   const [ratingFilter, setRatingFilter] = useState<'all' | Rating>('all')
   const [showAllRouteConcepts, setShowAllRouteConcepts] = useState(false)
@@ -208,6 +219,13 @@ export function ReviewWorkspace({ courseName, documents, concepts, ratings, sele
   const active = Boolean(session?.active)
   const route = active ? sessionRoute : plannedRoute
   const activeDocument = route.documents.find((document) => document.materialId === session?.activeDocumentId) ?? route.documents[0]
+  const activeLocation = useMemo(() => {
+    if (!activeDocument) return undefined
+    return route.concepts
+      .flatMap((concept) => concept.locations ?? [])
+      .filter((location) => location.materialId === activeDocument.materialId)
+      .sort((left, right) => (right.confidence ?? 0) - (left.confidence ?? 0) || left.start - right.start)[0]
+  }, [activeDocument, route.concepts])
   const activeQuickTest = session?.quickTests?.find((test) => test.id === activeQuickTestId) ?? session?.quickTests?.at(-1)
   const completed = new Set(session?.completedMaterialIds ?? [])
   const visibleDocuments = useMemo(() => selectedFirst(documents.filter((document) => selection.materialIds.includes(document.materialId) || normalized(`${document.title} ${originalFilename(document)}`).includes(normalized(search))), selection.materialIds, (document) => document.materialId), [documents, search, selection.materialIds])
@@ -234,8 +252,12 @@ export function ReviewWorkspace({ courseName, documents, concepts, ratings, sele
   useEffect(() => {
     if (!immersive) return
     const exitImmersive = (event: KeyboardEvent) => { if (event.key === 'Escape') setImmersive(false) }
+    document.documentElement.classList.add('review-immersive-active')
     window.addEventListener('keydown', exitImmersive)
-    return () => window.removeEventListener('keydown', exitImmersive)
+    return () => {
+      document.documentElement.classList.remove('review-immersive-active')
+      window.removeEventListener('keydown', exitImmersive)
+    }
   }, [immersive])
 
   useEffect(() => {
@@ -437,7 +459,8 @@ export function ReviewWorkspace({ courseName, documents, concepts, ratings, sele
     setMode('manual')
   }
 
-  if (active) return <div className={'review-session' + (immersive ? ' immersive' : '')}>
+  if (active) {
+    const sessionView = <div className={'review-session' + (immersive ? ' immersive' : '')}>
     <div className="review-session-top">
       <div><span className="eyebrow">复习会话 · {courseName}</span><h2>{route.concepts.length} 个知识点 · {route.documents.length} 份资料 · 已完成 {completed.size}/{route.documents.length}</h2></div>
       <Pomodoro focusMinutes={focusMinutes} breakMinutes={breakMinutes} onFocusComplete={() => { void window.xuejing?.deadlines.notify({ title: '番茄钟完成', body: `休息 ${breakMinutes} 分钟，再继续当前复习会话。` }) }} />
@@ -446,20 +469,22 @@ export function ReviewWorkspace({ courseName, documents, concepts, ratings, sele
     <div className="review-session-layout">
       <section className="review-reader">
         <div className="review-reader-tabs"><label><span>当前资料</span><select value={activeDocument?.materialId ?? ''} onChange={(event) => setCurrentDocument(event.target.value)}>{route.documents.map((document, index) => <option key={document.materialId} value={document.materialId}>{completed.has(document.materialId) ? '✓ ' : ''}{index + 1}. {originalFilename(document)}</option>)}</select></label><small>{activeDocument?.path?.join(' / ') || courseName}</small></div>
-        <div className="review-reader-head"><div><span className="eyebrow">学径内阅读 · {activeDocument?.type?.toUpperCase()}</span><h3>{originalFilename(activeDocument)}</h3><small>资料标题：{activeDocument?.title}</small></div><div><button className={completed.has(activeDocument?.materialId ?? '') ? 'outline-button completed' : 'outline-button'} onClick={toggleCompleted}>{completed.has(activeDocument?.materialId ?? '') ? '已复习' : '标为已复习'}</button>{activeDocument?.localPath ? <button className="outline-button" onClick={() => void window.xuejing?.documents.openLocal(activeDocument.localPath)}><ExternalLink size={14} />原文件</button> : null}</div></div>
+        <div className="review-reader-head"><div><span className="eyebrow">学径内阅读 · {activeDocument?.type?.toUpperCase()}</span><h3>{originalFilename(activeDocument)}</h3><small>资料标题：{activeDocument?.title}</small>{activeLocation ? <small className="review-reader-location">已按知识点定位到{activeLocation.kind === 'pptx-slide' ? '幻灯片' : activeLocation.kind === 'pdf-page' ? '第' : '章节'} {activeLocation.start}{activeLocation.end && activeLocation.end !== activeLocation.start ? `–${activeLocation.end}` : ''}{activeLocation.kind === 'pdf-page' ? ' 页' : ''}</small> : null}</div><div><button className={completed.has(activeDocument?.materialId ?? '') ? 'outline-button completed' : 'outline-button'} onClick={toggleCompleted}>{completed.has(activeDocument?.materialId ?? '') ? '已复习' : '标为已复习'}</button>{activeDocument?.localPath ? <button className="outline-button" onClick={() => void window.xuejing?.documents.openLocal(activeDocument.localPath)}><ExternalLink size={14} />原文件</button> : null}</div></div>
         {activeDocument && completed.has(activeDocument.materialId) ? <div className="material-quick-assessment"><div><strong>10 秒掌握确认</strong><span>只记录这份资料的学习感受，不会自动修改课程知识点自评。</span></div><div>{([[1, '没看懂'], [2, '有些模糊'], [3, '基本理解'], [4, '可以解释']] as [MaterialAssessment, string][]).map(([value, label]) => <button key={value} className={session?.materialAssessments?.[activeDocument.materialId] === value ? 'selected assessment-' + value : 'assessment-' + value} onClick={() => assessCurrentMaterial(value)}>{label}</button>)}</div></div> : null}
-        {readerError ? <p className="review-reader-error">{readerError}</p> : <DocumentViewer document={activeDocument} documents={documents} fallbackText={content?.text} />}
+        {readerError ? <p className="review-reader-error">{readerError}</p> : <DocumentViewer document={activeDocument} documents={documents} fallbackText={content?.text} initialLocation={activeLocation} />}
       </section>
       <aside className="review-chat">
         <div className="review-chat-head"><div><Bot size={17} /><div><strong>课程问答</strong><span>{aiConfigured ? '独立于左侧阅读区，基于当前资料回答' : '请先配置 AI API，或使用网页版 AI'}</span></div></div><div><button title="打开 DeepSeek" onClick={() => void window.xuejing?.external.openUrl('https://chat.deepseek.com/')}>DeepSeek</button><button title="打开豆包" onClick={() => void window.xuejing?.external.openUrl('https://www.doubao.com/chat/')}>豆包</button></div></div>
         <div className="review-chat-messages">{messages.length ? messages.map((message, index) => <article className={message.role} key={index}>{message.content}</article>) : <p>无需滚到资料底部。可以直接提问“这份资料的重点是什么？”、“请解释当前主题的推导步骤”。</p>}</div>
-        <div className="review-chat-compose"><textarea value={messageDraft} onChange={(event) => setMessageDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat() } }} placeholder="向当前资料提问…（Enter 发送，Shift+Enter 换行）" /><button disabled={chatBusy || !messageDraft.trim()} onClick={() => void sendChat()}>{chatBusy ? '思考中…' : <><Send size={14} />发送</>}</button></div>
+        <div className="review-chat-compose"><textarea ref={chatInputRef} value={messageDraft} onPointerDown={(event) => event.currentTarget.focus()} onChange={(event) => setMessageDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat() } }} placeholder="向当前资料提问…（Enter 发送，Shift+Enter 换行）" /><button disabled={chatBusy || !messageDraft.trim()} onClick={() => void sendChat()}>{chatBusy ? '思考中…' : <><Send size={14} />发送</>}</button></div>
       </aside>
     </div>
     {showExitAssessment ? <div className="review-exit-backdrop" onMouseDown={() => setShowExitAssessment(false)}><div className="review-exit-card" onMouseDown={(event) => event.stopPropagation()}><span className="eyebrow">结束前的 10 秒确认</span><h3>这份资料你现在掌握得怎么样？</h3><p>{originalFilename(activeDocument)}</p><div className="review-exit-options">{([[1, '没看懂'], [2, '有些模糊'], [3, '基本理解'], [4, '可以解释']] as [MaterialAssessment, string][]).map(([value, label]) => <button key={value} className={'assessment-' + value} onClick={() => prepareExitQuickTest(value)}>{label}</button>)}</div><button className="review-exit-skip" onClick={() => finishSession()}>暂不评估，直接结束</button><small>选择后可以进行本次会话的综合快速测试，也可以跳过测试并结束。</small></div></div> : null}
     {quizView === 'scope' ? <div className="review-exit-backdrop"><div className="review-exit-card quick-test-scope"><span className="eyebrow">3 分钟快速测试</span><h3>选择检测范围</h3><p>题量会根据资料数量、模糊资料和薄弱知识点自动调整，单轮 3～10 题。</p><div className="quick-test-scope-options"><button onClick={() => void startQuickTest('session')}><strong>本次复习会话</strong><small>检测已标记完成的全部资料，推荐</small></button><button onClick={() => void startQuickTest('current')}><strong>仅当前资料</strong><small>{originalFilename(activeDocument)}</small></button></div><button className="review-exit-skip" onClick={() => { if (quizExitAfter) finishSession(); else setQuizView('closed'); setQuizExitAfter(false) }}>{quizExitAfter ? '保存进度并结束，不进行测试' : '取消'}</button></div></div> : null}
     {quizView === 'test' ? <div className="review-exit-backdrop quick-test-backdrop"><div className="quick-test-card"><div className="quick-test-head"><div><span className="eyebrow">自适应快速测试</span><h3>{activeQuickTest ? `${activeQuickTest.questions.length} 道题 · ${activeQuickTest.scope === 'session' ? '本次会话' : activeQuickTest.scope === 'weak' ? '薄弱内容重测' : '当前资料'}` : '正在准备题目'}</h3></div><button onClick={closeQuickTest}><X size={16} /></button></div>{quizBusy ? <div className="quick-test-loading"><RefreshCw className="spin" size={20} /><strong>正在读取已完成资料并生成题目…</strong><span>应用会校验每道题的来源资料，越界题目不会显示。</span></div> : quizError ? <div className="quick-test-error"><strong>生成失败</strong><span>{quizError}</span><button className="outline-button" onClick={() => setQuizView('scope')}>重新选择范围</button></div> : activeQuickTest ? <><div className="quick-test-questions">{activeQuickTest.questions.map((question, index) => <article key={question.id}><div className="quick-test-question-title"><b>{index + 1}</b><strong>{question.prompt}</strong></div><div className="quick-test-options">{question.options.map((option, optionIndex) => { const chosen = activeQuickTest.answers[question.id] === optionIndex; const correct = activeQuickTest.status === 'completed' && optionIndex === question.correctIndex; const wrong = activeQuickTest.status === 'completed' && chosen && !correct; return <button key={optionIndex} disabled={activeQuickTest.status === 'completed'} className={`${chosen ? 'chosen' : ''} ${correct ? 'correct' : ''} ${wrong ? 'wrong' : ''}`} onClick={() => answerQuickTest(question.id, optionIndex)}><span>{String.fromCharCode(65 + optionIndex)}</span>{option}</button> })}</div>{activeQuickTest.status === 'completed' ? <div className="quick-test-explanation"><strong>{activeQuickTest.answers[question.id] === question.correctIndex ? '回答正确' : `正确答案：${String.fromCharCode(65 + question.correctIndex)}`}</strong><p>{question.explanation || '暂无补充解释'}</p><small>来源：{question.materialIds.map((id) => documents.find((document) => document.materialId === id)?.title ?? id).join('、')}</small></div> : null}</article>)}</div>{activeQuickTest.remainingMaterialIds?.length ? <div className="quick-test-remaining">本轮题量已达到快速测试上限，还有 {activeQuickTest.remainingMaterialIds.length} 份资料未被题目覆盖；下次生成会优先检测这些资料。</div> : null}<div className="quick-test-footer">{activeQuickTest.status === 'completed' ? <><div><span>本轮结果</span><strong>{activeQuickTest.score}%</strong><small>结果已保存在当前复习会话中</small></div><button className="primary-button" onClick={closeQuickTest}>{quizExitAfter ? '保存结果并结束会话' : '返回复习会话'}</button></> : <><span>已回答 {Object.keys(activeQuickTest.answers).length}/{activeQuickTest.questions.length}</span><button className="primary-button" disabled={Object.keys(activeQuickTest.answers).length < activeQuickTest.questions.length} onClick={submitQuickTest}>提交并查看结果</button></>}</div></> : null}</div></div> : null}
-  </div>
+    </div>
+    return immersive ? createPortal(sessionView, document.body) : sessionView
+  }
 
   return <div className="review-workspace">
     <div className="review-workspace-head"><div className="review-mode-tabs"><button className={mode === 'smart' ? 'active' : ''} onClick={() => changeMode('smart')}><Sparkles size={14} />系统规划</button><button className={mode === 'manual' ? 'active' : ''} onClick={() => changeMode('manual')}><Check size={14} />自选内容</button></div><div className="review-start-actions">{session && !session.active ? <button className="outline-button" onClick={resumePreviousSession}><RotateCcw size={14} />继续上次会话</button> : null}<button className="primary-button" disabled={!plannedRoute.documents.length || (mode === 'manual' && !selection.materialIds.length && !selection.conceptIds.length)} onClick={begin}><Play size={15} />{session && !session.active ? '按当前选择开始新会话' : '开始复习会话'}</button></div></div>

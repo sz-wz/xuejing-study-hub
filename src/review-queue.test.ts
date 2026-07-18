@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildReviewQueue, createReviewScheduleEntry, reviewQueueProgress, selectionForReviewQueueItem, suggestedNextReviewDate, type ReviewQueueItem } from './review-queue'
+import { buildReviewQueue, createReviewScheduleEntry, memoryScheduleFor, reviewQueueProgress, selectionForReviewQueueItem, suggestedNextReviewDate, type ReviewQueueItem } from './review-queue'
 
 const documents = [
   { materialId: 'm1', courseId: 'c1', courseName: '信号与系统', title: 'Lecture 1', status: 'parsed' },
@@ -42,6 +42,20 @@ describe('buildReviewQueue', () => {
     const item: ReviewQueueItem = { id: 'm1', courseId: 'c1', courseName: '信号与系统', title: 'Lecture 1', reason: '', priority: 1, materialId: 'm1' }
     expect(suggestedNextReviewDate(item, { c1: { active: false, materialIds: ['m1'], conceptIds: [], completedMaterialIds: ['m1'], materialAssessments: { m1: 2 }, materialAssessmentAt: { m1: '2026-07-13T10:00:00.000Z' }, startedAt: '' } })).toBe('2026-07-15')
     expect(suggestedNextReviewDate(item, { c1: { active: false, materialIds: ['m1'], conceptIds: [], completedMaterialIds: ['m1'], startedAt: '', quickTests: [{ id: 't', scope: 'current', questionCount: 1, generatedAt: '2026-07-13T11:00:00.000Z', status: 'completed', score: 100, answers: { q: 0 }, questions: [{ id: 'q', prompt: '', options: ['A', 'B'], correctIndex: 0, explanation: '', materialIds: ['m1'], conceptIds: [] }] }] } })).toBe('2026-07-20')
+  })
+
+  it('extends a stable interval after repeated successful evidence and resets it after a lapse', () => {
+    const item: ReviewQueueItem = { id: 'm1', courseId: 'c1', courseName: '信号与系统', title: 'Lecture 1', reason: '', priority: 1, materialId: 'm1' }
+    const stable = { c1: { active: false, materialIds: ['m1'], conceptIds: [], completedMaterialIds: ['m1'], startedAt: '', materialReviewHistory: [
+      { materialId: 'm1', assessment: 4 as const, assessedAt: '2026-07-01T10:00:00.000Z' },
+      { materialId: 'm1', assessment: 4 as const, assessedAt: '2026-07-08T10:00:00.000Z' },
+    ] } }
+    expect(memoryScheduleFor(item, stable)).toMatchObject({ intervalDays: 15, successfulReviews: 2, lapses: 0 })
+    expect(suggestedNextReviewDate(item, stable)).toBe('2026-07-23')
+
+    const lapsed = { c1: { ...stable.c1, materialReviewHistory: [...stable.c1.materialReviewHistory, { materialId: 'm1', assessment: 1 as const, assessedAt: '2026-07-09T10:00:00.000Z' }] } }
+    expect(memoryScheduleFor(item, lapsed)).toMatchObject({ intervalDays: 1, successfulReviews: 2, lapses: 1 })
+    expect(suggestedNextReviewDate(item, lapsed)).toBe('2026-07-10')
   })
 
   it('does not keep an old unclear assessment in today queue after a newer correct test', () => {

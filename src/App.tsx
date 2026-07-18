@@ -20,27 +20,50 @@ import { detectSyncChanges, emailDeliveryInboxItem, mergeSyncInbox, resolveSyncC
 import { AUTO_SYNC_INTERVALS, DEADLINE_EMAIL_THRESHOLDS, automaticSyncDelayMs, deadlineEmailCandidates, isQuietHour, type AutoSyncPreferences, type DeadlineEmailThreshold } from './background-sync'
 import { assignmentDueAt, deadlineLabel, deadlineReminderBucket, deadlineState, toDateTimeLocalValue } from './deadline-utils'
 import { KnowledgeMap } from './knowledge-map'
-import { ReviewWorkspace, type ReviewSelection, type ReviewSession } from './review-workspace'
+import { createReviewSession, ReviewWorkspace, type ReviewSelection, type ReviewSession } from './review-workspace'
 import { buildReviewHistory, calendarTaskStatus, distributeAcrossWeek, inactiveReviewDays, shiftDate, suggestionIsDismissed, weekDateKeys } from './review-calendar'
 import { buildReviewQueue, createReviewScheduleEntry, reviewQueueProgress, reviewTargetKey, selectionForReviewQueueItem, suggestedNextReviewDate, type ReviewQueueItem, type ReviewScheduleEntry } from './review-queue'
 import { isFolderExpanded, toggledFolders } from './library-tree'
 import type { Assignment, AssignmentFile, AssignmentStatus, Course, JournalEntry, Material } from './types'
 import { DEFAULT_APP_PREFERENCES, normalizeAppPreferences, resolveTheme, type AppPreferences, type ThemePreference } from './app-preferences'
+import { concreteCourseId, normalizeCourseFilter } from './course-filter'
+import { defaultRefinementSelection, eligibleRefinementDocuments, refinementState, toggleAllRefinementSelection } from './knowledge-refinement'
+import { recommendedVersionChanges } from './material-version-selection'
+import type { RefinementJob } from './electron'
+import { mergeEmailDigestQueue, shouldFlushDailyDigest, syncEmailEventsForMode, type SyncEmailMode } from './email-sync-policy'
 
 type Section = 'overview' | 'inbox' | 'library' | 'assignments' | 'knowledge' | 'map' | 'review' | 'schedule' | 'focus' | 'growth' | 'settings'
 type ConceptRating = 0 | 1 | 2 | 3 | 4
 type KnowledgeDocumentFilter = 'ready' | 'ocr' | 'unsupported' | 'failed' | 'all'
-type EmailSettings = { configured: boolean; enabled: boolean; host: string; port: number; secure: boolean; username: string; from: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean }
+type EmailSettings = { configured: boolean; enabled: boolean; host: string; port: number; secure: boolean; username: string; from: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean; syncEmailMode: SyncEmailMode; syncDigestHour: number }
+type AiProvider = 'openai' | 'deepseek' | 'gemini' | 'custom'
+type AiCapabilities = { provider: AiProvider; chat: boolean; files: boolean; responses: boolean; refinementMode: 'original-file' | 'structured-pages'; detectedAt: string; latencyMs: number }
+type AiConfiguration = { configured: boolean; provider: AiProvider; baseUrl: string; model: string; capabilities?: AiCapabilities }
+type AiProviderPreset = { id: AiProvider; label: string; baseUrl: string; description: string }
 type AutoSyncStatus = { state: 'idle' | 'scheduled' | 'syncing' | 'paused' | 'error'; lastAttempt?: string; lastSuccess?: string; nextAt?: string; message: string; consecutiveFailures: number }
 type StudyState = { courses: Course[]; materials: Material[]; assignments: Assignment[]; journal: JournalEntry[]; knowledgeRatings: Record<string, ConceptRating>; reviewSelections: Record<string, ReviewSelection>; reviewSessions: Record<string, ReviewSession>; reviewSchedule: ReviewScheduleEntry[]; dismissedReviewSuggestions: Record<string, string>; growthSnapshots: GrowthSnapshot[]; syncInbox: SyncInboxItem[] }
 type TreeNode = { folders: Map<string, TreeNode>; entries: Material[] }
 type FileState = 'available' | 'missing'
-type KnowledgeIndex = { documents: { materialId: string; courseId: string; courseName: string; title: string; localPath: string; status: string; hash?: string; error?: string; outline?: string[]; textLength?: number; knowledgeRole?: 'courseware' | 'reference'; ocr?: { pages: number; totalPages: number; language: string; truncated: boolean }; ai?: { summary: string; concepts: { title: string; evidence: string }[]; model: string; generatedAt: string; sourceHash?: string } }[]; concepts: { id: string; title: string; sourceIds: string[]; courseIds: string[] }[]; stats: { total: number; parsed: number; ocr: number; image: number; failed: number; unsupported: number; reference: number; concepts: number } }
+type KnowledgeLocation = { materialId: string; kind: 'pdf-page' | 'pptx-slide' | 'docx-section'; start: number; end?: number; confidence?: number; evidence?: string; method?: string; candidate?: boolean; manual?: boolean }
+type KnowledgePageIndex = { version: number; generatedAt: string; pages: number; concepts: number; located: number; candidates: number; model?: string; cloudError?: string }
+type KnowledgeAiConcept = { title: string; evidence: string; aliases?: string[]; locations?: KnowledgeLocation[]; locationCandidates?: KnowledgeLocation[] }
+type KnowledgeAiProfile = { summary: string; concepts: KnowledgeAiConcept[]; model: string; generatedAt: string; sourceHash?: string; mode?: 'quick' | 'deep' | 'original'; analysisMethod?: 'original-file' | 'structured-pages'; inputStrategy?: 'local-structured-pages'; originalFile?: { filename: string; bytes: number; uploadedAt: string }; locationBatches?: number; coverage?: { covered: number; total: number; percent: number; omittedRanges?: { kind: string; start: number; end: number }[] }; pageIndex?: KnowledgePageIndex }
+type KnowledgeDocument = { materialId: string; courseId: string; courseName: string; title: string; localPath: string; sourceUrl?: string; status: string; hash?: string; format?: string; error?: string; outline?: string[]; outlineLocations?: { title: string; locations: KnowledgeLocation[] }[]; textLength?: number; segmentCount?: number; knowledgeRole?: 'courseware' | 'reference'; ocr?: { pages: number; totalPages: number; language: string; truncated: boolean }; ai?: KnowledgeAiProfile; aiProfiles?: { quick?: KnowledgeAiProfile; deep?: KnowledgeAiProfile; original?: KnowledgeAiProfile } }
+type KnowledgeIndex = { documents: KnowledgeDocument[]; concepts: { id: string; title: string; aliases?: string[]; sourceIds: string[]; courseIds: string[]; locations?: KnowledgeLocation[] }[]; stats: { total: number; parsed: number; ocr: number; image: number; failed: number; unsupported: number; reference: number; concepts: number } }
+type PageLocationEditorState = { materialId: string; documentTitle: string; conceptTitle: string; kind: KnowledgeLocation['kind']; pageCount: number; locations: KnowledgeLocation[]; candidates: KnowledgeLocation[] }
+type MaterialVersionCatalog = { groups: MaterialVersionGroup[]; duplicates: { hash: string; keepPath: string; duplicatePaths: string[]; safeCleanupPaths: string[] }[] }
+type MaterialVersionGroup = { materialId: string; courseId: string; baseTitle: string; displayTitle: string; relation: 'single' | 'versions' | 'source-conflict'; activePath: string; recommendedPath: string; versions: { id: string; localPath: string; hash: string; importedAt: string; bytes: number; pages: number; descriptor: string; current: boolean }[] }
+
+function refinementJobStatusLabel(status: RefinementJob['status']) {
+  return ({ running: '后台运行中', pausing: '将在安全断点暂停', paused: '已暂停', cancelling: '正在停止', interrupted: '已中断，可继续', completed: '已完成', completed_with_errors: '部分完成', failed: '任务失败' } as const)[status]
+}
 
 const STORAGE_KEY = 'xuejing-study-hub-v3'
 const emptyStudy: StudyState = { courses: [], materials: [], assignments: [], journal: [], knowledgeRatings: {}, reviewSelections: {}, reviewSessions: {}, reviewSchedule: [], dismissedReviewSuggestions: {}, growthSnapshots: [], syncInbox: [] }
 const courseColors = ['#336a58', '#bf6a48', '#6a5f9e', '#3d7890', '#8a6a3d', '#a35e79']
 const APP_PREFERENCES_KEY = 'xuejing-app-preferences-v1'
+const EMAIL_DIGEST_QUEUE_KEY = 'xuejing-email-digest-queue-v1'
+const EMAIL_DIGEST_LAST_SENT_KEY = 'xuejing-email-digest-last-sent-v1'
 const SEARCH_COMMANDS: SearchCommand[] = [
   { id: 'nav-1', title: '打开学习总览', subtitle: '查看 DDL、今日复习队列和资料状态', keywords: '首页 总览', shortcut: 'Ctrl+1' },
   { id: 'nav-inbox', title: '打开学习收件箱', subtitle: '查看平台同步后新增和变化的信息', keywords: '收件箱 更新 变化 通知', shortcut: '' },
@@ -75,6 +98,15 @@ function loadAutoSyncStatus(): AutoSyncStatus {
     return value && typeof value === 'object' ? { state: 'idle', message: '', consecutiveFailures: 0, ...value } : { state: 'idle', message: '', consecutiveFailures: 0 }
   } catch {
     return { state: 'idle', message: '', consecutiveFailures: 0 }
+  }
+}
+
+function loadEmailDigestQueue(): SyncInboxItem[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(EMAIL_DIGEST_QUEUE_KEY) ?? '[]')
+    return Array.isArray(value) ? value : []
+  } catch {
+    return []
   }
 }
 
@@ -154,6 +186,20 @@ function materialKnowledgeRole(material: Material): 'courseware' | 'reference' {
   if (material.knowledgeRole) return material.knowledgeRole
   const label = [material.title, ...(material.path ?? [])].join(' ').toLocaleLowerCase()
   return /(?:textbook|reference|course reader|教材|教科书|课本|参考书)/u.test(label) ? 'reference' : 'courseware'
+}
+
+function buildKnowledgeDocuments(study: Pick<StudyState, 'courses' | 'materials'>) {
+  const coursesById = new Map(study.courses.map((course) => [course.id, course]))
+  return study.materials.filter((material) => material.localPath).map((material) => ({
+    materialId: material.id,
+    courseId: material.courseId,
+    courseName: coursesById.get(material.courseId)?.name ?? '未分类课程',
+    title: material.title,
+    localPath: material.localPath!,
+    type: material.type,
+    sourceUrl: material.url,
+    knowledgeRole: materialKnowledgeRole(material),
+  }))
 }
 
 function effectiveAssignmentStatus(assignment: Assignment): AssignmentStatus {
@@ -242,30 +288,81 @@ type KnowledgeDocumentListProps = {
   onToggle: (materialId: string) => void
   onRoleChange: (materialId: string, role: 'courseware' | 'reference') => void
   onOcr: (materialId: string) => void
-  onRefine: (materialId: string, force: boolean) => void
+  onRefine: (materialId: string) => void
+  onEditLocation: (document: KnowledgeDocument, concept: KnowledgeAiConcept) => void
+  versionGroups: ReadonlyMap<string, MaterialVersionGroup>
+  onVersionChange: (group: MaterialVersionGroup, localPath: string) => void
   aiConfigured: boolean
   busyKey: string | null
 }
 
-function KnowledgeDocumentList({ documents, expanded, onToggle, onRoleChange, onOcr, onRefine, aiConfigured, busyKey }: KnowledgeDocumentListProps) {
+function knowledgeLocationLabel(location: KnowledgeLocation) {
+  const range = location.end && location.end !== location.start ? `${location.start}–${location.end}` : String(location.start)
+  return location.kind === 'pptx-slide' ? `幻灯片 ${range}` : location.kind === 'pdf-page' ? `第 ${range} 页` : `章节 ${range}`
+}
+
+function knowledgeLocationsLabel(locations: KnowledgeLocation[] = []) {
+  if (!locations.length) return ''
+  const visible = locations.slice(0, 2).map(knowledgeLocationLabel).join('、')
+  return locations.length > 2 ? `${visible} 等 ${locations.length} 处` : visible
+}
+
+function inferredKnowledgeLocationKind(document: KnowledgeDocument): KnowledgeLocation['kind'] {
+  const located = document.ai?.concepts.flatMap((concept) => [...(concept.locations ?? []), ...(concept.locationCandidates ?? [])])[0]
+  if (located?.kind) return located.kind
+  const format = `${document.format ?? ''} ${document.localPath}`.toLowerCase()
+  return /\.pptx?\b/.test(format) ? 'pptx-slide' : /\.pdf\b/.test(format) ? 'pdf-page' : 'docx-section'
+}
+
+function pageLocationEditorFor(document: KnowledgeDocument, conceptTitle: string): PageLocationEditorState | null {
+  const concept = document.ai?.concepts.find((item) => item.title === conceptTitle)
+  if (!concept) return null
+  return {
+    materialId: document.materialId,
+    documentTitle: document.title,
+    conceptTitle,
+    kind: inferredKnowledgeLocationKind(document),
+    pageCount: document.ai?.pageIndex?.pages ?? document.segmentCount ?? 0,
+    locations: concept.locations ?? [],
+    candidates: concept.locationCandidates ?? [],
+  }
+}
+
+function KnowledgeDocumentList({ documents, expanded, onToggle, onRoleChange, onOcr, onRefine, onEditLocation, versionGroups, onVersionChange, aiConfigured, busyKey }: KnowledgeDocumentListProps) {
   return <div className="knowledge-document-list">{documents.map((document) => {
     const isParsed = document.status === 'parsed' || document.status === 'ocr'
     const isExpanded = expanded.has(document.materialId)
     const isReference = document.knowledgeRole === 'reference'
-    const aiCurrent = Boolean(document.ai && document.ai.sourceHash && document.ai.sourceHash === document.hash)
+    const originalAi = document.aiProfiles?.original ?? (document.ai?.mode === 'original' || document.ai?.analysisMethod === 'original-file' ? document.ai : undefined)
+    const originalAiCurrent = Boolean(originalAi && (!originalAi.sourceHash || originalAi.sourceHash === document.hash))
+    const legacyAi = !originalAi && document.ai
+    const versionGroup = versionGroups.get(document.materialId)
+    const displayTitle = versionGroup?.displayTitle ?? document.title
+    const indexedConcepts = document.ai?.concepts?.length ? document.ai.concepts : document.outlineLocations ?? []
+    const locatedCount = indexedConcepts.filter((concept) => concept.locations?.length).length
+    const candidateCount = document.ai?.pageIndex?.candidates ?? document.ai?.concepts.filter((concept) => concept.locationCandidates?.length).length ?? 0
     return <article className={isExpanded ? 'expanded-document' : ''} key={document.materialId}>
-      <FileText size={15} />
-      <div className="knowledge-document-main">
-        <strong>{document.title}</strong>
-        <span>{document.courseName} · {isParsed ? (document.outline?.length ?? 0) + ' 个本资料知识点' : document.error ?? '等待解析'}{isReference ? ' · 教材/参考资料' : ''}</span>
+      <div className="knowledge-document-heading">
+        <FileText size={15} />
+        <div className="knowledge-document-main">
+          <strong title={document.title}>{displayTitle}</strong>
+          <span>{document.courseName} · {isParsed ? (document.outline?.length ?? 0) + ' 个本资料知识点' : document.error ?? '等待解析'}{isReference ? ' · 教材/参考资料' : ''}</span>
+        </div>
       </div>
-      {isParsed && <button className="knowledge-document-toggle" onClick={() => onToggle(document.materialId)} aria-expanded={isExpanded}>{isExpanded ? '收起知识点' : '查看知识点'}</button>}
-      {document.status === 'image' && <button className="knowledge-document-toggle" disabled={busyKey === 'ocr:' + document.materialId} onClick={() => onOcr(document.materialId)}>{busyKey === 'ocr:' + document.materialId ? 'OCR 中…' : '本地 OCR'}</button>}
-      {isParsed && <button className="knowledge-document-toggle" disabled={!aiConfigured || busyKey === 'refine:' + document.materialId} onClick={() => onRefine(document.materialId, aiCurrent)}>{busyKey === 'refine:' + document.materialId ? '精炼中…' : aiCurrent ? '重新 AI 精炼' : 'AI 精炼'}</button>}
-      <button className="knowledge-document-toggle" onClick={() => onRoleChange(document.materialId, isReference ? 'courseware' : 'reference')}>{isReference ? '改为课件' : '设为教材'}</button>
-      <em className={'knowledge-status ' + document.status}>{isParsed ? (document.status === 'ocr' ? '已 OCR' : isReference ? '参考资料' : '已解析') : document.status === 'failed' ? '失败' : document.status === 'image' ? '等待 OCR' : document.status === 'empty' ? '无文本' : '暂不支持'}</em>
-      {document.ai ? <em className={'knowledge-status ai-refined ' + (aiCurrent ? '' : 'stale')} title={`模型：${document.ai.model}；${new Date(document.ai.generatedAt).toLocaleString()}`}>{aiCurrent ? 'AI 已精炼' : 'AI 待更新'}</em> : null}
-      {isParsed && isExpanded && <div className="document-concepts"><span>{document.ai?.summary || (isReference ? '该教材提取的参考主题（不会进入课程知识点）' : '本资料提取的候选知识点')}</span><div>{document.ai?.concepts?.length ? document.ai.concepts.map((concept) => <i key={concept.title} title={concept.evidence}>{concept.title}</i>) : document.outline?.length ? document.outline.map((title) => <i key={title}>{title}</i>) : <small>未提取到足够可靠的知识点。</small>}</div></div>}
+      <div className="knowledge-document-actions">
+        {isParsed && <button className="knowledge-document-toggle" onClick={() => onToggle(document.materialId)} aria-expanded={isExpanded}>{isExpanded ? '收起知识点' : '查看知识点'}</button>}
+        {document.status === 'image' && <button className="knowledge-document-toggle" disabled={busyKey === 'ocr:' + document.materialId || Boolean(busyKey?.startsWith('reindex'))} onClick={() => onOcr(document.materialId)}>{busyKey === 'ocr:' + document.materialId ? 'OCR 中…' : '本地 OCR'}</button>}
+        {isParsed && !isReference && <button className="knowledge-document-toggle" disabled={!aiConfigured || busyKey === 'version-switch'} onClick={() => onRefine(document.materialId)}>{originalAiCurrent ? '重新 AI 精炼' : 'AI 精炼'}</button>}
+        <button className="knowledge-document-toggle" onClick={() => onRoleChange(document.materialId, isReference ? 'courseware' : 'reference')}>{isReference ? '改为课件' : '设为教材'}</button>
+        {versionGroup && versionGroup.versions.length > 1 ? <label className={`material-version-picker ${versionGroup.relation}`}><span>{versionGroup.relation === 'source-conflict' ? '来源冲突' : `${versionGroup.versions.length} 个版本`}</span><select value={versionGroup.activePath} disabled={busyKey === 'version-switch'} onChange={(event) => onVersionChange(versionGroup, event.target.value)}>{versionGroup.versions.map((version, index) => <option key={version.id} value={version.localPath}>{index === 0 ? '最新 · ' : ''}{version.descriptor}{version.importedAt ? ` · ${new Date(version.importedAt).toLocaleDateString()}` : ''}</option>)}</select></label> : null}
+        <em className={'knowledge-status ' + document.status}>{isParsed ? (document.status === 'ocr' ? '已 OCR' : isReference ? '参考资料' : '已解析') : document.status === 'failed' ? '失败' : document.status === 'image' ? '等待 OCR' : document.status === 'empty' ? '无文本' : '暂不支持'}</em>
+        {originalAi ? <em className={'knowledge-status ai-refined ' + (originalAiCurrent ? '' : 'stale')} title={`模型：${originalAi.model}；${new Date(originalAi.generatedAt).toLocaleString()}`}>{originalAiCurrent ? 'AI 已精炼' : 'AI 待更新'}</em> : legacyAi ? <em className="knowledge-status ai-refined stale" title="旧版文本精炼结果会继续保留；重新精炼时会按当前 API 能力自动选择精炼方式。">旧版 AI 结果</em> : null}
+        {originalAiCurrent ? <em className="knowledge-status ai-mode">{originalAi?.analysisMethod === 'original-file' ? '原件直传' : originalAi?.analysisMethod === 'structured-pages' ? '分页兼容' : 'AI 分析'}</em> : null}
+        {originalAiCurrent && originalAi?.coverage ? <em className="knowledge-status page-analyzed" title={originalAi.coverage.percent < 100 ? '当前精炼流程只覆盖了部分页面' : '当前精炼流程已覆盖完整资料'}>页面分析 {originalAi.coverage.percent}%</em> : null}
+        {isParsed && indexedConcepts.length ? <em className="knowledge-status page-indexed" title={`${locatedCount}/${indexedConcepts.length} 个知识点已有确认页码或幻灯片范围`}>知识定位 {locatedCount}/{indexedConcepts.length}</em> : null}
+        {candidateCount ? <em className="knowledge-status page-candidate" title="这些范围尚未达到自动确认阈值，可展开知识点后人工确认或忽略">候选页 {candidateCount} 项</em> : null}
+      </div>
+      {isParsed && isExpanded && <div className="document-concepts"><span>{document.ai?.summary || (isReference ? '该教材提取的参考主题（不会进入课程知识点）' : '本资料提取的候选知识点')}{document.ai?.locationBatches ? ` · AI 分 ${document.ai.locationBatches} 组分析页面` : ''}</span><div>{indexedConcepts.length ? indexedConcepts.map((concept) => { const aiConcept = 'evidence' in concept ? concept as KnowledgeAiConcept : null; const candidates = aiConcept?.locationCandidates ?? []; return <i className={`${concept.locations?.length ? 'located' : ''} ${candidates.length ? 'has-candidates' : ''}`} key={concept.title} title={'evidence' in concept ? concept.evidence : concept.title}><b>{concept.title}</b>{concept.locations?.length ? <small>{knowledgeLocationsLabel(concept.locations)}</small> : <small>尚无已确认页码</small>}{candidates.length ? <small className="candidate-location">待确认：{knowledgeLocationsLabel(candidates)}</small> : null}{aiConcept ? <button type="button" onClick={() => onEditLocation(document, aiConcept)}>编辑页码</button> : null}</i> }) : <small>未提取到足够可靠的知识点。</small>}</div></div>}
     </article>
   })}</div>
 }
@@ -285,6 +382,7 @@ export default function App() {
   const [autoCacheEnabled, setAutoCacheEnabled] = useState(() => localStorage.getItem('xuejing-auto-cache-v1') !== 'false')
   const [connected, setConnected] = useState(false)
   const [gradescopeConnected, setGradescopeConnected] = useState(false)
+  const [platformStatusReady, setPlatformStatusReady] = useState(false)
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [showCommandCenter, setShowCommandCenter] = useState(false)
@@ -302,10 +400,14 @@ export default function App() {
   const [migrationTarget, setMigrationTarget] = useState('')
   const [migrationProgress, setMigrationProgress] = useState<{ completed: number; total: number; title: string } | null>(null)
   const [knowledgeIndex, setKnowledgeIndex] = useState<KnowledgeIndex | null>(null)
+  const [materialVersionCatalog, setMaterialVersionCatalog] = useState<MaterialVersionCatalog>({ groups: [], duplicates: [] })
   const [knowledgeProgress, setKnowledgeProgress] = useState<{ completed: number; total: number; title: string } | null>(null)
   const [expandedKnowledgeDocuments, setExpandedKnowledgeDocuments] = useState<Set<string>>(() => new Set())
   const [knowledgeCourseFilter, setKnowledgeCourseFilter] = useState<'current' | 'all' | string>('current')
   const [knowledgeDocumentFilter, setKnowledgeDocumentFilter] = useState<KnowledgeDocumentFilter>('ready')
+  const [pageLocationEditor, setPageLocationEditor] = useState<PageLocationEditorState | null>(null)
+  const [pageLocationDraftStart, setPageLocationDraftStart] = useState('')
+  const [pageLocationDraftEnd, setPageLocationDraftEnd] = useState('')
   const [mapCourseFilter, setMapCourseFilter] = useState('all')
   const [reviewCourseFilter, setReviewCourseFilter] = useState<'current' | string>('current')
   const [reviewExamDate, setReviewExamDate] = useState(() => localStorage.getItem('xuejing-review-exam-date-v1') ?? '')
@@ -320,12 +422,23 @@ export default function App() {
   const [calendarBatchDate, setCalendarBatchDate] = useState('')
   const [expandedCalendarHistory, setExpandedCalendarHistory] = useState<string[]>([])
   const [showAiSettings, setShowAiSettings] = useState(false)
-  const [aiConfig, setAiConfig] = useState({ configured: false, baseUrl: '', model: '' })
+  const [showBatchRefinement, setShowBatchRefinement] = useState(false)
+  const [batchRefinementSelection, setBatchRefinementSelection] = useState<string[]>([])
+  const [refinementJobs, setRefinementJobs] = useState<RefinementJob[]>([])
+  const [showRefinementTaskPanel, setShowRefinementTaskPanel] = useState(false)
+  const [aiConfig, setAiConfig] = useState<AiConfiguration>({ configured: false, provider: 'custom', baseUrl: '', model: '' })
+  const [aiProviderPresets, setAiProviderPresets] = useState<AiProviderPreset[]>([])
+  const [aiModels, setAiModels] = useState<string[]>([])
   const [aiApiKey, setAiApiKey] = useState('')
   const [showEmailSettings, setShowEmailSettings] = useState(false)
-  const [emailConfig, setEmailConfig] = useState<EmailSettings>({ configured: false, enabled: false, host: '', port: 465, secure: true, username: '', from: '', recipient: '', notifyCourseUpdates: true, notifyDeadlines: true })
+  const [emailConfig, setEmailConfig] = useState<EmailSettings>({ configured: false, enabled: false, host: '', port: 465, secure: true, username: '', from: '', recipient: '', notifyCourseUpdates: true, notifyDeadlines: true, syncEmailMode: 'important', syncDigestHour: 20 })
   const [emailPassword, setEmailPassword] = useState('')
   const [emailTestState, setEmailTestState] = useState<{ kind: 'testing' | 'success' | 'error'; message: string } | null>(null)
+  const [emailDigestQueue, setEmailDigestQueue] = useState<SyncInboxItem[]>(loadEmailDigestQueue)
+  const [emailDigestLastSent, setEmailDigestLastSent] = useState(() => localStorage.getItem(EMAIL_DIGEST_LAST_SENT_KEY) ?? '')
+  const immediateEmailQueueRef = useRef<SyncInboxItem[]>([])
+  const immediateEmailTimerRef = useRef<number | null>(null)
+  const emailDigestSendingRef = useRef(false)
   const [inboxFilter, setInboxFilter] = useState<'unread' | 'all' | 'archived'>('unread')
   const [inboxSourceFilter, setInboxSourceFilter] = useState<'all' | 'Blackboard' | 'Gradescope' | 'Email'>('all')
 
@@ -370,6 +483,7 @@ export default function App() {
   const autoSyncGradescopeAfterLogin = useRef(false)
   const syncLockRef = useRef(false)
   const automaticSyncRunRef = useRef(false)
+  const recommendedVersionsAppliedRef = useRef<Set<string>>(new Set())
   const autoSyncTimerRef = useRef<number | null>(null)
   const autoSyncLaunchHandledRef = useRef(false)
   const autoSyncFailuresRef = useRef(0)
@@ -435,16 +549,7 @@ export default function App() {
     }
   }
   const knowledgeDocuments = useMemo(() => {
-    const coursesById = new Map(study.courses.map((course) => [course.id, course]))
-    return study.materials.filter((material) => material.localPath).map((material) => ({
-      materialId: material.id,
-      courseId: material.courseId,
-      courseName: coursesById.get(material.courseId)?.name ?? '未分类课程',
-      title: material.title,
-      localPath: material.localPath!,
-      type: material.type,
-      knowledgeRole: materialKnowledgeRole(material),
-    }))
+    return buildKnowledgeDocuments(study)
   }, [study.courses, study.materials])
 
   const showToast = useCallback((text: string) => {
@@ -489,8 +594,12 @@ export default function App() {
   const refreshKnowledgeStatus = useCallback(async () => {
     if (!window.xuejing?.knowledge.status) return
     try {
-      const result = await window.xuejing.knowledge.status({ documents: knowledgeDocuments })
+      const [result, versions] = await Promise.all([
+        window.xuejing.knowledge.status({ documents: knowledgeDocuments }),
+        window.xuejing.vault.materialVersions?.({ documents: knowledgeDocuments }).catch(() => null),
+      ])
       setKnowledgeIndex(result)
+      if (versions) setMaterialVersionCatalog(versions)
     } catch {
       // 知识库尚未建立或本地索引暂不可读时，保持空状态。
     }
@@ -498,6 +607,7 @@ export default function App() {
 
   const buildKnowledgeBase = async () => {
     if (!window.xuejing?.knowledge.build) return showToast('请在 Windows 桌面应用中构建知识库。')
+    if (busyKey?.startsWith('reindex')) return showToast('页级索引正在写入，请完成后再构建知识库。')
     if (!knowledgeDocuments.length) return showToast('请先缓存或导入 PDF、PPTX 等课程资料。')
     setBusyKey('knowledge-build')
     setKnowledgeProgress({ completed: 0, total: knowledgeDocuments.length, title: '' })
@@ -510,8 +620,61 @@ export default function App() {
     } finally { setBusyKey(null) }
   }
 
+  const applyMaterialVersionPaths = useCallback(async (replacements: Map<string, string>, automatic = false) => {
+    const api = window.xuejing
+    if (!api?.knowledge.build || !replacements.size) return false
+    const snapshot = studyRef.current
+    const nextStudy = {
+      ...snapshot,
+      materials: snapshot.materials.map((material) => replacements.has(material.id) ? { ...material, localPath: replacements.get(material.id), meta: automatic ? '已自动使用最新资料版本' : '已切换资料版本' } : material),
+    }
+    setBusyKey('version-switch')
+    setKnowledgeProgress({ completed: 0, total: nextStudy.materials.length, title: automatic ? '正在启用最新资料版本…' : '正在切换资料版本…' })
+    try {
+      const documents = buildKnowledgeDocuments(nextStudy)
+      const result = await api.knowledge.build({ documents })
+      const versions = await api.vault.materialVersions({ documents })
+      studyRef.current = nextStudy
+      setStudy(nextStudy)
+      setKnowledgeIndex(result)
+      setMaterialVersionCatalog(versions)
+      if (!automatic) showToast('资料版本已切换；知识库已使用该版本重新建立，切回旧版本时会恢复对应的 AI 结果。')
+      return true
+    } catch (error) {
+      showToast(`资料版本切换失败：${messageOf(error)}`)
+      return false
+    } finally {
+      setBusyKey(null)
+    }
+  }, [showToast])
+
+  const switchMaterialVersion = async (group: MaterialVersionGroup, localPath: string) => {
+    if (localPath === group.activePath) return
+    if (group.relation === 'source-conflict' && !window.confirm('这个 Blackboard 来源曾返回内容差异很大的文件，可能不是普通新旧版本。确认切换并重新建立该资料的知识库吗？')) return
+    await applyMaterialVersionPaths(new Map([[group.materialId, localPath]]))
+  }
+
+  const cleanupDuplicateFiles = async () => {
+    const paths = materialVersionCatalog.duplicates.flatMap((group) => group.safeCleanupPaths)
+    if (!paths.length) return showToast('没有可安全清理的完全重复孤立文件。')
+    if (!window.confirm(`发现 ${paths.length} 个内容完全相同、且没有被课程资料或清单引用的孤立副本。是否从资料库中删除？`)) return
+    setBusyKey('duplicate-cleanup')
+    try {
+      const result = await window.xuejing?.vault.cleanupDuplicates({ documents: knowledgeDocuments, paths })
+      if (!result) return
+      const versions = await window.xuejing?.vault.materialVersions({ documents: knowledgeDocuments })
+      if (versions) setMaterialVersionCatalog(versions)
+      showToast(`已清理 ${result.removed.length} 个完全重复副本${result.rejected.length ? `，${result.rejected.length} 个因仍被引用而保留` : ''}。`)
+    } catch (error) {
+      showToast(messageOf(error))
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
   const runKnowledgeOcr = async (materialId: string) => {
     const api = window.xuejing?.knowledge
+    if (busyKey?.startsWith('reindex')) return showToast('页级索引正在写入，请完成后再运行 OCR。')
     if (!api?.ocr) return showToast('请在 Windows 桌面应用中运行本地 OCR。')
     setBusyKey('ocr:' + materialId)
     setKnowledgeProgress({ completed: 0, total: 1, title: '正在准备本地 OCR…' })
@@ -528,6 +691,7 @@ export default function App() {
 
   const runBatchOcr = async () => {
     const api = window.xuejing?.knowledge
+    if (busyKey?.startsWith('reindex')) return showToast('页级索引正在写入，请完成后再运行 OCR。')
     const materialIds = visibleKnowledgeDocuments.filter((document) => document.status === 'image').map((document) => document.materialId)
     if (!materialIds.length) return showToast('当前课程没有等待 OCR 的扫描 PDF。请先构建知识库。')
     if (!api?.ocrBatch) return showToast('请在 Windows 桌面应用中运行本地 OCR。')
@@ -537,6 +701,37 @@ export default function App() {
       const result = await api.ocrBatch({ documents: knowledgeDocuments, materialIds })
       setKnowledgeIndex(result)
       showToast(result.batch.failed.length ? '批量 OCR 完成：成功 ' + result.batch.completed + ' 份，失败 ' + result.batch.failed.length + ' 份。' : '批量 OCR 完成：已识别 ' + result.batch.completed + ' 份扫描 PDF。')
+    } catch (error) {
+      showToast(messageOf(error))
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const openPageLocationEditor = (document: KnowledgeDocument, concept: KnowledgeAiConcept) => {
+    const editor = pageLocationEditorFor(document, concept.title)
+    if (!editor) return
+    setPageLocationEditor(editor)
+    setPageLocationDraftStart('')
+    setPageLocationDraftEnd('')
+  }
+
+  const updatePageLocation = async (action: 'add' | 'remove' | 'confirm' | 'reject', location?: KnowledgeLocation) => {
+    const api = window.xuejing?.knowledge
+    if (!pageLocationEditor || !api?.updatePageLocation) return
+    const start = location?.start ?? Number(pageLocationDraftStart)
+    const end = location?.end ?? Number(pageLocationDraftEnd || pageLocationDraftStart)
+    const kind = location?.kind ?? pageLocationEditor.kind
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) return showToast('请输入有效的开始页和结束页。')
+    setBusyKey('page-location')
+    try {
+      const result = await api.updatePageLocation({ documents: knowledgeDocuments, materialId: pageLocationEditor.materialId, conceptTitle: pageLocationEditor.conceptTitle, action, location: { kind, start, end } })
+      setKnowledgeIndex(result)
+      const updatedDocument = result.documents.find((document) => document.materialId === pageLocationEditor.materialId)
+      setPageLocationEditor(updatedDocument ? pageLocationEditorFor(updatedDocument, pageLocationEditor.conceptTitle) : null)
+      setPageLocationDraftStart('')
+      setPageLocationDraftEnd('')
+      showToast(action === 'confirm' ? '候选范围已确认为知识定位。' : action === 'reject' ? '候选范围已忽略。' : action === 'remove' ? '该页码范围已删除。' : '已添加人工页码范围。')
     } catch (error) {
       showToast(messageOf(error))
     } finally {
@@ -565,25 +760,74 @@ export default function App() {
     }
   }
 
-  const runBatchCloudRefinement = async () => {
-    const api = window.xuejing?.knowledge
+  const openBatchCloudRefinement = () => {
+    if (busyKey?.startsWith('reindex')) return showToast('页级索引正在写入，请完成后再启动 AI 精炼。')
+    if (activeRefinementJob) {
+      setShowRefinementTaskPanel(true)
+      return showToast('已有 AI 精炼任务正在后台运行，可在任务面板中暂停或停止。')
+    }
     if (!activeKnowledgeCourseId) return showToast('请先在知识库顶部选择一门具体课程，再批量 AI 精炼。')
     if (!aiConfig.configured) {
       setShowAiSettings(true)
       return showToast('请先保存云端 API 配置。')
     }
-    const materialIds = visibleKnowledgeDocuments
-      .filter((document) => (document.status === 'parsed' || document.status === 'ocr') && document.knowledgeRole !== 'reference' && document.ai?.sourceHash !== document.hash)
-      .map((document) => document.materialId)
-    if (!materialIds.length) return showToast('当前课程没有需要 AI 精炼的已解析课件。')
-    if (!window.confirm('将向云端发送当前课程的 ' + materialIds.length + ' 份已提取资料文本，用于生成知识点。是否继续？')) return
-    if (!api?.refineBatch) return showToast('请在 Windows 桌面应用中使用 AI 精炼。')
-    setBusyKey('refine-batch')
-    setKnowledgeProgress({ completed: 0, total: materialIds.length, title: '正在批量请求云端 AI 精炼…' })
+    if (!batchRefinementCandidates.length) return showToast('当前课程没有可进行 AI 精炼的已解析课件。')
+    setBatchRefinementSelection(defaultRefinementSelection(batchRefinementCandidates))
+    setShowBatchRefinement(true)
+  }
+
+  const openDocumentCloudRefinement = (materialId: string) => {
+    if (busyKey?.startsWith('reindex')) return showToast('页级索引正在写入，请完成后再启动 AI 精炼。')
+    const document = knowledgeIndex?.documents.find((item) => item.materialId === materialId)
+    if (document?.knowledgeRole === 'reference') return showToast('教材和参考资料只进行本地解析、搜索和阅读，不参与 AI 知识点精炼。')
+    if (activeRefinementJob) {
+      setShowRefinementTaskPanel(true)
+      return showToast('已有 AI 精炼任务正在运行，请先等待、暂停或停止。')
+    }
+    if (!aiConfig.configured) {
+      setShowAiSettings(true)
+      return showToast('请先保存云端 API 配置。')
+    }
+    setBatchRefinementSelection([materialId])
+    setShowBatchRefinement(true)
+  }
+
+  const runBatchCloudRefinement = async () => {
+    const api = window.xuejing?.knowledge
+    const selected = new Set(batchRefinementSelection)
+    const materialIds = batchRefinementCandidates.filter((document) => selected.has(document.materialId)).map((document) => document.materialId)
+    const jobCourseId = activeKnowledgeCourseId ?? batchRefinementCandidates.find((document) => selected.has(document.materialId))?.courseId
+    if (!materialIds.length) return showToast('请至少选择一份需要精炼的资料。')
+    if (!api?.startRefinementJob || !jobCourseId) return showToast('请在 Windows 桌面应用中使用后台 AI 精炼。')
+    setBusyKey('refine-job-start')
     try {
-      const result = await api.refineBatch({ documents: knowledgeDocuments, materialIds })
-      setKnowledgeIndex(result)
-      showToast(result.batch.failed.length ? '批量 AI 精炼完成：成功 ' + result.batch.completed + ' 份，失败 ' + result.batch.failed.length + ' 份。' : '批量 AI 精炼完成：已精炼 ' + result.batch.completed + ' 份课件。')
+      const job = await api.startRefinementJob({ documents: knowledgeDocuments, materialIds, courseId: jobCourseId, mode: 'original', force: true })
+      setRefinementJobs((current) => [job, ...current.filter((item) => item.id !== job.id)])
+      setShowBatchRefinement(false)
+      setBatchRefinementSelection([])
+      showToast(`AI 精炼已转入后台：${materialIds.length} 份资料。你可以继续使用其他页面。`)
+    } catch (error) {
+      showToast(messageOf(error))
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const controlRefinementJob = async (action: 'pause' | 'cancel' | 'resume' | 'restart' | 'dismiss', jobId: string) => {
+    const api = window.xuejing?.knowledge
+    if (!api) return
+    setBusyKey('refinement-control')
+    try {
+      const result = action === 'pause' ? await api.pauseRefinementJob(jobId)
+        : action === 'cancel' ? await api.cancelRefinementJob(jobId)
+          : action === 'resume' ? await api.resumeRefinementJob({ jobId })
+            : action === 'restart' ? await api.resumeRefinementJob({ jobId, restart: true })
+              : await api.dismissRefinementJob(jobId)
+      if ('id' in result) setRefinementJobs((current) => [result, ...current.filter((item) => item.id !== result.id)])
+      else {
+        setRefinementJobs((current) => current.filter((item) => item.id !== jobId))
+        setShowRefinementTaskPanel(false)
+      }
     } catch (error) {
       showToast(messageOf(error))
     } finally {
@@ -596,7 +840,7 @@ export default function App() {
     if (!api?.saveSettings) return showToast('请在 Windows 桌面应用中保存 AI 配置。')
     setBusyKey('ai-settings')
     try {
-      const result = await api.saveSettings({ baseUrl: aiConfig.baseUrl, model: aiConfig.model, apiKey: aiApiKey || undefined })
+      const result = await api.saveSettings({ provider: aiConfig.provider, baseUrl: aiConfig.baseUrl, model: aiConfig.model, apiKey: aiApiKey || undefined, capabilities: aiConfig.capabilities })
       setAiConfig(result)
       setAiApiKey('')
       setShowAiSettings(false)
@@ -614,8 +858,25 @@ export default function App() {
     setBusyKey('ai-test')
     setAiConnectionState({ kind: 'testing', message: '正在发送最小测试请求…' })
     try {
-      const result = await api.testConnection({ baseUrl: aiConfig.baseUrl, model: aiConfig.model, apiKey: aiApiKey || undefined })
-      setAiConnectionState({ kind: 'success', message: `连接正常：${result.model}，${result.latencyMs} ms` })
+      const result = await api.testConnection({ provider: aiConfig.provider, baseUrl: aiConfig.baseUrl, model: aiConfig.model, apiKey: aiApiKey || undefined })
+      setAiConfig((current) => ({ ...current, provider: result.capabilities.provider, capabilities: result.capabilities }))
+      setAiConnectionState({ kind: 'success', message: `连接正常：${result.model}，${result.latencyMs} ms；精炼方式：${result.capabilities.refinementMode === 'original-file' ? '原件直传' : '本地分页兼容'}` })
+    } catch (error) {
+      setAiConnectionState({ kind: 'error', message: messageOf(error) })
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const loadAiModels = async () => {
+    const api = window.xuejing?.ai
+    if (!api?.listModels) return showToast('当前环境不支持读取模型列表。')
+    setBusyKey('ai-models')
+    setAiConnectionState({ kind: 'testing', message: '正在从官方或兼容接口读取模型列表…' })
+    try {
+      const result = await api.listModels({ provider: aiConfig.provider, baseUrl: aiConfig.baseUrl, model: aiConfig.model, apiKey: aiApiKey || undefined })
+      setAiModels(result.models)
+      setAiConnectionState({ kind: 'success', message: `已读取 ${result.models.length} 个可用模型；请选择后再进行能力检测。` })
     } catch (error) {
       setAiConnectionState({ kind: 'error', message: messageOf(error) })
     } finally {
@@ -763,6 +1024,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false
     void window.xuejing?.ai?.settings().then((settings) => { if (!cancelled) setAiConfig(settings) })
+    void window.xuejing?.ai?.presets().then((presets) => { if (!cancelled) setAiProviderPresets(presets) })
     void window.xuejing?.email?.settings().then((settings) => { if (!cancelled) setEmailConfig(settings) })
     void window.xuejing?.credentials?.blackboard().then((settings) => { if (!cancelled) setBlackboardCredential(settings) })
     return () => { cancelled = true }
@@ -773,11 +1035,74 @@ export default function App() {
     setSelectedCourseId(study.courses[0]?.id ?? null)
   }, [selectedCourseId, study.courses])
 
+  useEffect(() => {
+    const courseIds = study.courses.map((course) => course.id)
+    setAssignmentCourseFilter((value) => normalizeCourseFilter(value, courseIds, 'all'))
+    setGrowthCourseFilter((value) => normalizeCourseFilter(value, courseIds, 'all'))
+    setMapCourseFilter((value) => normalizeCourseFilter(value, courseIds, 'all'))
+    setKnowledgeCourseFilter((value) => normalizeCourseFilter(value, courseIds, 'current'))
+    setReviewCourseFilter((value) => normalizeCourseFilter(value, courseIds, 'current'))
+  }, [study.courses])
+
+  const sendSyncDigest = useCallback(async (events: SyncInboxItem[]) => {
+    if (!events.length || !window.xuejing?.email) return false
+    try {
+      await window.xuejing.email.sendSyncUpdate({ events: events.map(({ title, detail, source, kind, courseId }) => ({ title, detail, source, kind, courseId })) })
+      return true
+    } catch (error) {
+      showToast(`同步已完成，但邮件通知发送失败：${messageOf(error)}`)
+      return false
+    }
+  }, [showToast])
+
   const notifySyncChangesByEmail = useCallback((events: SyncInboxItem[]) => {
-    if (!events.length || !emailConfig.enabled || !emailConfig.configured || !emailConfig.notifyCourseUpdates || !window.xuejing?.email) return
-    void window.xuejing.email.sendSyncUpdate({ events: events.map(({ title, detail, source }) => ({ title, detail, source })) })
-      .catch((error) => showToast(`同步已完成，但邮件通知发送失败：${messageOf(error)}`))
-  }, [emailConfig.configured, emailConfig.enabled, emailConfig.notifyCourseUpdates, showToast])
+    if (!events.length || !emailConfig.enabled || !emailConfig.configured || emailConfig.syncEmailMode === 'off' || !window.xuejing?.email) return
+    const selected = syncEmailEventsForMode(events, emailConfig.syncEmailMode)
+    if (!selected.length) return
+    if (emailConfig.syncEmailMode === 'daily') {
+      setEmailDigestQueue((current) => mergeEmailDigestQueue(current, selected))
+      return
+    }
+    immediateEmailQueueRef.current = mergeEmailDigestQueue(immediateEmailQueueRef.current, selected)
+    if (immediateEmailTimerRef.current !== null) window.clearTimeout(immediateEmailTimerRef.current)
+    immediateEmailTimerRef.current = window.setTimeout(() => {
+      const pending = immediateEmailQueueRef.current
+      immediateEmailQueueRef.current = []
+      immediateEmailTimerRef.current = null
+      void sendSyncDigest(pending)
+    }, 15_000)
+  }, [emailConfig.configured, emailConfig.enabled, emailConfig.syncEmailMode, sendSyncDigest])
+
+  useEffect(() => {
+    localStorage.setItem(EMAIL_DIGEST_QUEUE_KEY, JSON.stringify(emailDigestQueue))
+  }, [emailDigestQueue])
+
+  useEffect(() => {
+    if (emailDigestLastSent) localStorage.setItem(EMAIL_DIGEST_LAST_SENT_KEY, emailDigestLastSent)
+  }, [emailDigestLastSent])
+
+  useEffect(() => {
+    if (!emailConfig.enabled || !emailConfig.configured || emailConfig.syncEmailMode !== 'daily' || !emailDigestQueue.length) return
+    const flush = async () => {
+      if (emailDigestSendingRef.current || !shouldFlushDailyDigest(emailDigestLastSent, emailConfig.syncDigestHour)) return
+      emailDigestSendingRef.current = true
+      try {
+        if (await sendSyncDigest(emailDigestQueue)) {
+          setEmailDigestQueue([])
+          setEmailDigestLastSent(new Date().toISOString())
+        }
+      } finally {
+        emailDigestSendingRef.current = false
+      }
+    }
+    void flush()
+    const timer = window.setInterval(() => { void flush() }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [emailConfig.configured, emailConfig.enabled, emailConfig.syncDigestHour, emailConfig.syncEmailMode, emailDigestLastSent, emailDigestQueue, sendSyncDigest])
+
+  useEffect(() => () => {
+    if (immediateEmailTimerRef.current !== null) window.clearTimeout(immediateEmailTimerRef.current)
+  }, [])
 
   const resolveConnectionWarning = useCallback((source: 'Blackboard' | 'Gradescope') => {
     setStudy((current) => {
@@ -906,6 +1231,10 @@ export default function App() {
 
   useEffect(() => {
     if (autoSyncTimerRef.current !== null) window.clearTimeout(autoSyncTimerRef.current)
+    if (!platformStatusReady) {
+      setAutoSyncStatus((current) => ({ ...current, state: 'paused', nextAt: undefined, message: '正在恢复平台登录状态' }))
+      return
+    }
     if (!appPreferences.autoSync.enabled || (!appPreferences.autoSync.blackboard && !appPreferences.autoSync.gradescope)) {
       setAutoSyncStatus((current) => ({ ...current, state: 'idle', nextAt: undefined, message: '自动同步已关闭' }))
       return
@@ -959,12 +1288,13 @@ export default function App() {
       if (autoSyncTimerRef.current !== null) window.clearTimeout(autoSyncTimerRef.current)
       autoSyncTimerRef.current = null
     }
-  }, [appPreferences.autoSync])
+  }, [appPreferences.autoSync, platformStatusReady])
 
   useEffect(() => {
     const bridge = window.xuejing
     if (!bridge) {
       setVaultRoot('网页预览模式：资料库仅可在桌面应用中设置')
+      setPlatformStatusReady(true)
       return
     }
     let cancelled = false
@@ -975,8 +1305,19 @@ export default function App() {
       const repaired = new Map(result.repairedFiles.map((file) => [file.from, file.to]))
       if (repaired.size) setStudy((current) => ({ ...current, materials: current.materials.map((material) => material.localPath && repaired.has(material.localPath) ? { ...material, localPath: repaired.get(material.localPath) } : material) }))
     })
-    void bridge.blackboard.status().then((result) => { if (!cancelled) { setConnected(result.connected); if (result.connected) resolveConnectionWarning('Blackboard') } })
-    void bridge.gradescope.status().then((result) => { if (!cancelled) { setGradescopeConnected(result.connected); if (result.connected) resolveConnectionWarning('Gradescope') } })
+    void Promise.allSettled([bridge.blackboard.status(), bridge.gradescope.status()]).then(([blackboard, gradescope]) => {
+      if (cancelled) return
+      if (blackboard.status === 'fulfilled') {
+        setConnected(blackboard.value.connected)
+        if (blackboard.value.connected) resolveConnectionWarning('Blackboard')
+      }
+      if (gradescope.status === 'fulfilled') {
+        setGradescopeConnected(gradescope.value.connected)
+        if (gradescope.value.connected) resolveConnectionWarning('Gradescope')
+      }
+      setPlatformStatusReady(true)
+    })
+    void bridge.knowledge.refinementJobs().then((jobs) => { if (!cancelled) setRefinementJobs(jobs) })
     const dispose = bridge.blackboard.onConnectionChanged((status) => {
       if (cancelled) return
       setConnected(status.connected)
@@ -997,8 +1338,16 @@ export default function App() {
     })
     const disposeMigration = bridge.vault.onMigrationProgress((progress) => { if (!cancelled) setMigrationProgress(progress) })
     const disposeKnowledge = bridge.knowledge.onProgress((progress) => { if (!cancelled) setKnowledgeProgress(progress) })
-    return () => { cancelled = true; dispose(); disposeGradescope(); disposeMigration(); disposeKnowledge() }
+    const disposeRefinement = bridge.knowledge.onRefinementJobChange((job) => {
+      if (!cancelled) setRefinementJobs((current) => [job, ...current.filter((item) => item.id !== job.id)])
+    })
+    return () => { cancelled = true; dispose(); disposeGradescope(); disposeMigration(); disposeKnowledge(); disposeRefinement() }
   }, [resolveConnectionWarning, syncBlackboard, syncGradescope])
+
+  useEffect(() => {
+    if (!refinementJobs[0]) return
+    void refreshKnowledgeStatus()
+  }, [refinementJobs[0]?.completedIds.length, refinementJobs[0]?.status, refreshKnowledgeStatus])
 
   const connectBlackboard = async () => {
     const api = window.xuejing?.blackboard
@@ -1174,12 +1523,20 @@ export default function App() {
   }
 
   const selectedCourse = study.courses.find((course) => course.id === selectedCourseId) ?? null
+  const courseIds = useMemo(() => study.courses.map((course) => course.id), [study.courses])
+  const chooseCourseFilter = (value: string, update: (value: string) => void) => {
+    update(value)
+    if (value !== 'all' && value !== 'current' && courseIds.includes(value)) setSelectedCourseId(value)
+  }
   const activeCourseIdSet = useMemo(() => activeCourseIds(study.courses), [study.courses])
   const libraryMaterials = useMemo(() => study.materials.filter((material) => material.kind !== 'assignment'), [study.materials])
   const selectedMaterials = useMemo(() => selectedCourse ? libraryMaterials.filter((material) => material.courseId === selectedCourse.id) : [], [libraryMaterials, selectedCourse])
   const selectedTree = useMemo(() => buildTree(selectedMaterials), [selectedMaterials])
   const pendingAssignments = useMemo(() => study.assignments.filter((assignment) => !assignmentCompleted(assignment)), [study.assignments])
   const assignmentCourses = useMemo(() => study.courses.filter((course) => study.assignments.some((assignment) => assignment.courseId === course.id)), [study.assignments, study.courses])
+  useEffect(() => {
+    if (assignmentCourseFilter !== 'all' && !assignmentCourses.some((course) => course.id === assignmentCourseFilter)) setAssignmentCourseFilter('all')
+  }, [assignmentCourseFilter, assignmentCourses])
   const visibleAssignments = useMemo(() => study.assignments.filter((assignment) => {
     if (assignmentCourseFilter !== 'all' && assignment.courseId !== assignmentCourseFilter) return false
     return showCompletedAssignments || !assignmentCompleted(assignment)
@@ -1212,8 +1569,31 @@ export default function App() {
     .filter((assignment) => deadlineState(assignment, deadlineNow) !== 'unknown')
     .sort((a, b) => new Date(assignmentDueAt(a)!).getTime() - new Date(assignmentDueAt(b)!).getTime())
     .slice(0, 6), [deadlineNow, pendingAssignments])
-  const activeKnowledgeCourseId = knowledgeCourseFilter === 'all' ? null : knowledgeCourseFilter === 'current' ? selectedCourseId : knowledgeCourseFilter
+  const activeKnowledgeCourseId = concreteCourseId(knowledgeCourseFilter, selectedCourseId, courseIds)
   const visibleKnowledgeDocuments = useMemo(() => knowledgeIndex?.documents.filter((document) => !activeKnowledgeCourseId || document.courseId === activeKnowledgeCourseId) ?? [], [activeKnowledgeCourseId, knowledgeIndex])
+  const batchRefinementCandidates = useMemo(() => eligibleRefinementDocuments(visibleKnowledgeDocuments)
+    .sort((left, right) => left.title.localeCompare(right.title, 'zh-CN', { numeric: true })), [visibleKnowledgeDocuments])
+  const batchRefinementSelected = useMemo(() => new Set(batchRefinementSelection), [batchRefinementSelection])
+  const batchRefinementCurrentCount = useMemo(() => batchRefinementCandidates
+    .filter((document) => batchRefinementSelected.has(document.materialId) && refinementState(document) === 'current').length,
+  [batchRefinementCandidates, batchRefinementSelected])
+  const versionGroupsByMaterialId = useMemo(() => new Map(materialVersionCatalog.groups.map((group) => [group.materialId, group])), [materialVersionCatalog.groups])
+  const batchRefinementBytes = useMemo(() => batchRefinementCandidates.filter((document) => batchRefinementSelected.has(document.materialId)).reduce((total, document) => {
+    const group = versionGroupsByMaterialId.get(document.materialId)
+    return total + (group?.versions.find((version) => version.current)?.bytes ?? 0)
+  }, 0), [batchRefinementCandidates, batchRefinementSelected, versionGroupsByMaterialId])
+  const latestRefinementJob = refinementJobs[0] ?? null
+  const activeRefinementJob = refinementJobs.find((job) => ['running', 'pausing', 'cancelling'].includes(job.status)) ?? null
+  useEffect(() => {
+    if (busyKey || activeRefinementJob) return
+    const { replacements, signatures } = recommendedVersionChanges(materialVersionCatalog.groups, recommendedVersionsAppliedRef.current)
+    if (!replacements.size) return
+    signatures.forEach((signature) => recommendedVersionsAppliedRef.current.add(signature))
+    void applyMaterialVersionPaths(replacements, true).then((success) => {
+      if (!success) signatures.forEach((signature) => recommendedVersionsAppliedRef.current.delete(signature))
+      else showToast(`已自动为 ${replacements.size} 份资料启用最新的相近版本。`)
+    })
+  }, [activeRefinementJob, applyMaterialVersionPaths, busyKey, materialVersionCatalog.groups, showToast])
   const visibleKnowledgeConcepts = useMemo(() => knowledgeIndex?.concepts.filter((concept) => !activeKnowledgeCourseId || concept.courseIds.includes(activeKnowledgeCourseId)) ?? [], [activeKnowledgeCourseId, knowledgeIndex])
   const knowledgeDocumentCounts = useMemo(() => visibleKnowledgeDocuments.reduce<Record<Exclude<KnowledgeDocumentFilter, 'all'>, number>>((counts, document) => {
     counts[knowledgeDocumentBucket(document)] += 1
@@ -1222,7 +1602,7 @@ export default function App() {
   const displayedKnowledgeDocuments = useMemo(() => visibleKnowledgeDocuments
     .filter((document) => knowledgeDocumentFilter === 'all' || knowledgeDocumentBucket(document) === knowledgeDocumentFilter)
     .sort((left, right) => left.title.localeCompare(right.title, 'zh-CN', { numeric: true })), [knowledgeDocumentFilter, visibleKnowledgeDocuments])
-  const activeReviewCourseId = reviewCourseFilter === 'current' ? selectedCourseId : reviewCourseFilter
+  const activeReviewCourseId = concreteCourseId(reviewCourseFilter, selectedCourseId, courseIds)
   const reviewDocuments = useMemo(() => (knowledgeIndex?.documents ?? []).filter((document) => !activeReviewCourseId || document.courseId === activeReviewCourseId), [activeReviewCourseId, knowledgeIndex])
   const reviewConcepts = useMemo(() => (knowledgeIndex?.concepts ?? [])
     .filter((concept) => !activeReviewCourseId || concept.courseIds.includes(activeReviewCourseId))
@@ -1287,6 +1667,9 @@ export default function App() {
   const completedQuickTests = useMemo(() => Object.values(study.reviewSessions).flatMap((session) => session.quickTests ?? []).filter((test) => test.status === 'completed'), [study.reviewSessions])
   const quickTestAverage = completedQuickTests.length ? Math.round(completedQuickTests.reduce((sum, test) => sum + (test.score ?? 0), 0) / completedQuickTests.length) : null
   const growthCourseMetrics = useMemo(() => buildCourseGrowthMetrics(knowledgeIndex?.documents ?? [], knowledgeIndex?.concepts ?? [], study.knowledgeRatings, study.reviewSessions), [knowledgeIndex, study.knowledgeRatings, study.reviewSessions])
+  useEffect(() => {
+    if (growthCourseFilter !== 'all' && !growthCourseMetrics.some((course) => course.courseId === growthCourseFilter)) setGrowthCourseFilter('all')
+  }, [growthCourseFilter, growthCourseMetrics])
   const growthActivity = useMemo(() => buildGrowthActivity(study.reviewSessions, growthRange, deadlineNow), [deadlineNow, growthRange, study.reviewSessions])
   const growthActivityMax = Math.max(1, ...growthActivity.map((day) => day.total))
   const growthContactedCount = growthCourseMetrics.reduce((sum, course) => sum + course.contactedMaterials, 0)
@@ -1567,12 +1950,12 @@ export default function App() {
     try { await window.xuejing?.external.openUrl(url); showToast('已在默认浏览器打开链接。') } catch (error) { showToast(messageOf(error)) }
   }
 
-  const openMapDocumentInReview = (materialId: string, courseId: string) => {
-    const conceptIds = (knowledgeIndex?.concepts ?? []).filter((concept) => concept.courseIds.includes(courseId) && concept.sourceIds.includes(materialId)).map((concept) => concept.id).slice(0, 8)
+  const openMapDocumentInReview = (materialId: string, courseId: string, conceptId?: string) => {
+    const conceptIds = conceptId ? [conceptId] : (knowledgeIndex?.concepts ?? []).filter((concept) => concept.courseIds.includes(courseId) && concept.sourceIds.includes(materialId)).map((concept) => concept.id).slice(0, 8)
     setStudy((current) => ({
       ...current,
       reviewSelections: { ...current.reviewSelections, [courseId]: { materialIds: [materialId], conceptIds, focus: current.reviewSelections[courseId]?.focus ?? '', mode: 'manual' } },
-      reviewSessions: { ...current.reviewSessions, [courseId]: { active: true, materialIds: [materialId], conceptIds, activeDocumentId: materialId, completedMaterialIds: current.reviewSessions[courseId]?.completedMaterialIds ?? [], startedAt: new Date().toISOString() } },
+      reviewSessions: { ...current.reviewSessions, [courseId]: createReviewSession([materialId], conceptIds, current.reviewSessions[courseId]) },
     }))
     setSelectedCourseId(courseId)
     setReviewCourseFilter(courseId)
@@ -2036,7 +2419,7 @@ export default function App() {
             <div className="page-heading"><div><span className="eyebrow">学习收件箱</span><h1>只看同步后真正发生的变化。</h1><p>Blackboard 与 Gradescope 的新增课程、资料、作业、DDL、提交状态和成绩变化会集中到这里；重复同步不会重复提醒。</p></div><div className="inbox-heading-actions"><button className="outline-button" disabled={!unreadInboxCount} onClick={() => updateInbox(study.syncInbox.filter((item) => !item.readAt && !item.archivedAt).map((item) => item.id), 'read')}><BookOpenCheck size={14} />全部已读</button><button className="primary-button" onClick={() => setShowEmailSettings(true)}><Mail size={14} />邮箱通知</button></div></div>
             <div className="sync-inbox-toolbar"><div><button className={inboxFilter === 'unread' ? 'selected' : ''} onClick={() => setInboxFilter('unread')}>未读 {unreadInboxCount}</button><button className={inboxFilter === 'all' ? 'selected' : ''} onClick={() => setInboxFilter('all')}>全部</button><button className={inboxFilter === 'archived' ? 'selected' : ''} onClick={() => setInboxFilter('archived')}>已归档</button></div><select value={inboxSourceFilter} onChange={(event) => setInboxSourceFilter(event.target.value as typeof inboxSourceFilter)}><option value="all">全部来源</option><option value="Blackboard">Blackboard</option><option value="Gradescope">Gradescope</option><option value="Email">邮件通知</option></select></div>
             {visibleInboxItems.length ? <div className="sync-inbox-list">{visibleInboxItems.map((item) => {
-              const kindLabel = { course_added: '新课程', material_added: '新资料', assignment_added: '新作业', deadline_changed: 'DDL', assignment_status_changed: '状态', score_changed: '成绩', connection_required: '需登录', email_sent: '邮件', email_failed: '邮件失败' }[item.kind]
+              const kindLabel = { sync_summary: '同步摘要', course_added: '新课程', material_added: '新资料', material_batch_added: '资料批次', assignment_added: '新作业', deadline_changed: 'DDL', assignment_status_changed: '状态', score_changed: '成绩', connection_required: '需登录', email_sent: '邮件', email_failed: '邮件失败' }[item.kind]
               return <article className={`${item.readAt ? 'read' : 'unread'} ${item.archivedAt ? 'archived' : ''}`} key={item.id}><span className={`sync-inbox-kind ${item.kind}`}>{kindLabel}</span><div><strong>{item.title}</strong><p>{item.detail}</p><small>{item.source} · {new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false })}</small></div><div className="sync-inbox-actions">{!item.archivedAt ? <><button onClick={() => openInboxItem(item)}>打开</button><button onClick={() => updateInbox([item.id], item.readAt ? 'unread' : 'read')}>{item.readAt ? '标为未读' : '标为已读'}</button><button title="归档" onClick={() => updateInbox([item.id], 'archive')}><Archive size={14} /></button></> : <button onClick={() => updateInbox([item.id], 'unread')}>恢复到未读</button>}</div></article>
             })}</div> : <div className="empty-library"><Inbox size={31} /><strong>{inboxFilter === 'unread' ? '没有未读变化' : inboxFilter === 'archived' ? '还没有归档内容' : '学习收件箱还是空的'}</strong><span>同步 Blackboard 或 Gradescope 后，新发现的信息会出现在这里。</span><div><button className="outline-button" onClick={connected ? syncBlackboard : connectBlackboard}>同步 Blackboard</button><button className="outline-button inline-gap" onClick={gradescopeConnected ? syncGradescope : connectGradescope}>同步 Gradescope</button></div></div>}
           </section>}
@@ -2052,7 +2435,7 @@ export default function App() {
 
           {section === 'assignments' && <section>
             <div className="assignment-manual-entry"><div><strong>其他平台或线下作业</strong><span>手动填写题目说明、DDL 与链接后，可直接使用现有分析流程。</span></div><button className="primary-button" onClick={openManualAssignment}><Plus size={15} />手动添加作业</button></div>
-            <div className="page-heading"><div><span className="eyebrow">统一作业中心</span><h1>按学期和课程集中管理待办与提交入口。</h1><p>Gradescope 会同步提交状态和成绩；Blackboard 作业也会汇入此处。默认仅显示待处理作业，已完成内容可随时展开查看。</p></div><div className="assignment-actions"><select value={assignmentCourseFilter} onChange={(event) => setAssignmentCourseFilter(event.target.value)}><option value="all">全部课程</option>{assignmentCourses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select><button className={`outline-button ${showCompletedAssignments ? 'enabled-toggle' : ''}`} onClick={() => setShowCompletedAssignments((current) => !current)}>{showCompletedAssignments ? '隐藏已完成' : '查看已完成'}</button><button className="outline-button" disabled={busyKey === 'gradescope-sync'} onClick={gradescopeConnected ? syncGradescope : connectGradescope}><RefreshCw size={14} className={busyKey === 'gradescope-sync' ? 'spin' : ''} />{busyKey === 'gradescope-sync' ? '同步中…' : gradescopeConnected ? '同步 Gradescope' : '连接 Gradescope'}</button><button className="outline-button" disabled={busyKey === 'sync' || busyKey === 'scan'} onClick={connected ? syncBlackboard : connectBlackboard}><RefreshCw size={14} className={busyKey === 'sync' || busyKey === 'scan' ? 'spin' : ''} />{connected ? '同步 Blackboard' : '连接 Blackboard'}</button></div></div>
+            <div className="page-heading"><div><span className="eyebrow">统一作业中心</span><h1>按学期和课程集中管理待办与提交入口。</h1><p>Gradescope 会同步提交状态和成绩；Blackboard 作业也会汇入此处。默认仅显示待处理作业，已完成内容可随时展开查看。</p></div><div className="assignment-actions"><select value={assignmentCourseFilter} onChange={(event) => chooseCourseFilter(event.target.value, setAssignmentCourseFilter)}><option value="all">全部课程</option>{assignmentCourses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select><button className={`outline-button ${showCompletedAssignments ? 'enabled-toggle' : ''}`} onClick={() => setShowCompletedAssignments((current) => !current)}>{showCompletedAssignments ? '隐藏已完成' : '查看已完成'}</button><button className="outline-button" disabled={busyKey === 'gradescope-sync'} onClick={gradescopeConnected ? syncGradescope : connectGradescope}><RefreshCw size={14} className={busyKey === 'gradescope-sync' ? 'spin' : ''} />{busyKey === 'gradescope-sync' ? '同步中…' : gradescopeConnected ? '同步 Gradescope' : '连接 Gradescope'}</button><button className="outline-button" disabled={busyKey === 'sync' || busyKey === 'scan'} onClick={connected ? syncBlackboard : connectBlackboard}><RefreshCw size={14} className={busyKey === 'sync' || busyKey === 'scan' ? 'spin' : ''} />{connected ? '同步 Blackboard' : '连接 Blackboard'}</button></div></div>
             {!study.assignments.length ? <div className="empty-library"><Send size={31} /><strong>还没有同步到作业</strong><span>连接并同步 Gradescope 或 Blackboard 后，作业会自动汇总在这里。</span><button className="primary-button" onClick={gradescopeConnected ? syncGradescope : connectGradescope}>{gradescopeConnected ? '同步 Gradescope 作业' : '连接 Gradescope'}</button></div> : !visibleAssignments.length ? <div className="empty-library compact"><Send size={27} /><strong>当前筛选下没有待处理作业</strong><span>已提交、已批改和手动完成的作业默认隐藏。可点击“查看已完成”核对历史记录。</span></div> : <div className="assignment-term-list">{assignmentTerms.map(([term, assignments]) => {
               const byCourse = new Map<string, Assignment[]>()
               for (const assignment of assignments) {
@@ -2066,16 +2449,17 @@ export default function App() {
           </section>}
 
           {section === "knowledge" && <section>
-            <div className="page-heading"><div><span className="eyebrow">本地知识库</span><h1>先看每份资料的知识点，再汇总为课程知识。</h1><p>解析在本机完成。课件会生成可追溯的资料级知识点；教材和参考书只保留为参考来源，默认不扩充课程知识条目。</p></div><div className="knowledge-actions"><select className="knowledge-course-filter" value={knowledgeCourseFilter} onChange={(event) => setKnowledgeCourseFilter(event.target.value)}><option value="current">{selectedCourse ? "当前课程：" + selectedCourse.name : "当前课程（未选择）"}</option><option value="all">全部课程</option>{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select><button className="outline-button" disabled={busyKey === "refine-batch" || !aiConfig.configured || !activeKnowledgeCourseId} onClick={runBatchCloudRefinement}>{busyKey === "refine-batch" ? "AI 精炼中…" : "批量 AI 精炼"}</button><button className="outline-button" disabled={busyKey === "ocr-batch" || !visibleKnowledgeDocuments.some((document) => document.status === "image")} onClick={runBatchOcr}>{busyKey === "ocr-batch" ? "批量 OCR 中…" : "批量 OCR"}</button><button className="primary-button" disabled={busyKey === "knowledge-build"} onClick={buildKnowledgeBase}><Network size={15} />{busyKey === "knowledge-build" ? "构建中…" : "构建 / 更新知识库"}</button><button className="outline-button" onClick={() => setShowAiSettings(true)}>AI 设置</button></div></div>
+            <div className="page-heading"><div><span className="eyebrow">本地知识库</span><h1>本地构建资料索引，AI 自动选择合适的精炼方式。</h1><p>支持原件输入的 API 会直接分析课件；DeepSeek、Gemini 或仅支持对话的兼容接口会使用本地分页解析。教材与参考书只作本地阅读和搜索来源。</p></div><div className="knowledge-actions"><select className="knowledge-course-filter" value={activeKnowledgeCourseId ?? 'all'} onChange={(event) => chooseCourseFilter(event.target.value, setKnowledgeCourseFilter)}><option value="all">全部课程</option>{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select><button className="outline-button" disabled={busyKey === "refine-job-start" || (!activeRefinementJob && (!aiConfig.configured || !activeKnowledgeCourseId))} onClick={openBatchCloudRefinement}>{busyKey === "refine-job-start" ? "创建任务中…" : activeRefinementJob ? "查看 AI 任务" : "批量 AI 精炼"}</button><button className="outline-button" disabled={busyKey === "ocr-batch" || !visibleKnowledgeDocuments.some((document) => document.status === "image")} onClick={runBatchOcr}>{busyKey === "ocr-batch" ? "批量 OCR 中…" : "批量 OCR"}</button><button className="primary-button" disabled={busyKey === "knowledge-build" || busyKey === 'version-switch'} onClick={buildKnowledgeBase}><Network size={15} />{busyKey === "knowledge-build" ? "构建中…" : "本地构建 / 更新"}</button><button className="outline-button" onClick={() => setShowAiSettings(true)}>AI 设置</button></div></div>
             <div className="growth-stats"><div><span>本地资料</span><strong>{knowledgeDocuments.length}</strong><small>已缓存或手动导入</small></div><div><span>已解析</span><strong>{knowledgeIndex?.stats.parsed ?? 0}</strong><small>{knowledgeIndex?.stats.unsupported ? (knowledgeIndex.stats.unsupported + " 份暂不支持") : "PDF、PPT/PPTX、DOCX、LaTeX 本地提取"}</small></div><div><span>课程知识点</span><strong>{knowledgeIndex?.stats.concepts ?? 0}</strong><small>{knowledgeIndex?.stats.reference ? (knowledgeIndex.stats.reference + " 份教材/参考资料未计入") : "仅由课件生成"}</small></div></div>
-            {knowledgeProgress && ['knowledge-build', 'ocr-batch', 'refine-batch'].includes(busyKey ?? '') || knowledgeProgress && Boolean(busyKey?.startsWith('ocr:') || busyKey?.startsWith('refine:')) ? <div className="knowledge-progress"><span>{busyKey === 'refine-batch' || busyKey?.startsWith('refine:') ? `AI 精炼进度 ${knowledgeProgress.completed}/${knowledgeProgress.total}` : `正在处理 ${knowledgeProgress.completed}/${knowledgeProgress.total}`}</span><strong>{knowledgeProgress.title || "正在整理知识索引…"}</strong></div> : null}
+            {materialVersionCatalog.duplicates.some((group) => group.safeCleanupPaths.length) ? <div className="panel duplicate-file-notice"><div><strong>发现完全重复的历史孤立副本</strong><span>{materialVersionCatalog.duplicates.reduce((total, group) => total + group.safeCleanupPaths.length, 0)} 个文件内容与已保留资料完全相同，并且没有被课程资料或资料库清单引用。</span></div><button className="outline-button" disabled={busyKey === 'duplicate-cleanup'} onClick={cleanupDuplicateFiles}>{busyKey === 'duplicate-cleanup' ? '清理中…' : '检查并清理'}</button></div> : null}
+            {knowledgeProgress && Boolean(['knowledge-build', 'ocr-batch', 'refine-batch', 'version-switch'].includes(busyKey ?? '') || busyKey?.startsWith('ocr:') || busyKey?.startsWith('refine:')) ? <div className="knowledge-progress"><span>{busyKey === 'refine-batch' || busyKey?.startsWith('refine:') ? `AI 精炼 ${knowledgeProgress.completed}/${knowledgeProgress.total}` : `正在处理 ${knowledgeProgress.completed}/${knowledgeProgress.total}`}</span><strong>{knowledgeProgress.title || "正在整理知识索引…"}</strong></div> : null}
             {visibleKnowledgeConcepts.length ? <div className="panel knowledge-graph-panel"><div className="panel-title"><div><h2>全景知识图谱</h2><p>资料级知识点、资料节点和课程知识点会在独立的可缩放地图中完整呈现，不再截断为少量条目。</p></div><button className="outline-button" onClick={() => { setMapCourseFilter(activeKnowledgeCourseId ?? 'all'); setSection('map') }}>打开知识图谱</button></div></div> : null}
-            {!knowledgeDocuments.length ? <div className="empty-library"><Database size={31} /><strong>还没有可建立知识库的本地资料</strong><span>先在“课程资料”中缓存 Blackboard 文件或导入本地资料。</span><button className="primary-button" onClick={() => setSection("library")}>打开课程资料</button></div> : <div className="knowledge-layout"><div className="panel knowledge-panel"><div className="panel-title"><h2>资料级知识点</h2><span>{visibleKnowledgeDocuments.length} 份当前课程资料</span></div><div className="knowledge-document-filters"><button className={knowledgeDocumentFilter === 'ready' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('ready')}>可用 {knowledgeDocumentCounts.ready}</button><button className={knowledgeDocumentFilter === 'ocr' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('ocr')}>待 OCR {knowledgeDocumentCounts.ocr}</button><button className={knowledgeDocumentFilter === 'unsupported' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('unsupported')}>暂不支持 {knowledgeDocumentCounts.unsupported}</button><button className={knowledgeDocumentFilter === 'failed' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('failed')}>解析失败/无文本 {knowledgeDocumentCounts.failed}</button><button className={knowledgeDocumentFilter === 'all' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('all')}>全部</button></div>{displayedKnowledgeDocuments.length ? <KnowledgeDocumentList documents={displayedKnowledgeDocuments} expanded={expandedKnowledgeDocuments} onToggle={toggleKnowledgeDocument} onRoleChange={changeKnowledgeRole} onOcr={runKnowledgeOcr} onRefine={runCloudRefinement} aiConfigured={aiConfig.configured} busyKey={busyKey} /> : <p className="muted">当前分类没有资料。可切换上方筛选查看待 OCR、暂不支持或解析失败的文件。</p>}</div><div className="panel knowledge-panel concept-evidence-panel"><div className="panel-title"><div><h2>课程知识点</h2><p>自评与测试证据并列显示，测试不会覆盖你的主动判断。</p></div><span>{visibleKnowledgeConcepts.length} 个</span></div>{visibleKnowledgeConcepts.length ? <div className="knowledge-concept-list">{visibleKnowledgeConcepts.map((concept) => { const evidence = conceptEvidence[concept.id]; const courseId = activeKnowledgeCourseId ?? concept.courseIds[0]; return <article className={`concept-evidence-row ${evidence?.status ?? 'unassessed'}`} key={concept.id}><div><strong>{concept.title}</strong><span>{concept.sourceIds.length} 份课件来源 · 最近复习 {evidence?.lastReviewedAt ? new Date(evidence.lastReviewedAt).toLocaleDateString() : '暂无记录'}</span></div><span className={`concept-evidence-status ${evidence?.status ?? 'unassessed'}`}>{conceptEvidenceLabels[evidence?.status ?? 'unassessed']}</span><div className="concept-evidence-values"><small>自评：{['未评估', '陌生', '模糊', '理解', '掌握'][evidence?.selfRating ?? 0]}</small><small>测试：{evidence?.latestTestScore === null || evidence?.latestTestScore === undefined ? '未覆盖' : `${evidence.latestTestScore}% · ${evidence.latestTestQuestions} 题`}</small></div>{courseId ? <button onClick={() => openConceptReview(concept.id, courseId)}>{evidence && conceptNeedsReview(evidence) ? '复习薄弱点' : '加入复习'}</button> : null}</article> })}</div> : <p className="muted">课程知识点由课件的资料级知识点汇总而来。教材不会自动扩大这个列表。</p>}</div></div>}
+            {!knowledgeDocuments.length ? <div className="empty-library"><Database size={31} /><strong>还没有可建立知识库的本地资料</strong><span>先在“课程资料”中缓存 Blackboard 文件或导入本地资料。</span><button className="primary-button" onClick={() => setSection("library")}>打开课程资料</button></div> : <div className="knowledge-layout"><div className="panel knowledge-panel"><div className="panel-title"><h2>资料级知识点</h2><span>{visibleKnowledgeDocuments.length} 份当前课程资料</span></div><div className="knowledge-document-filters"><button className={knowledgeDocumentFilter === 'ready' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('ready')}>可用 {knowledgeDocumentCounts.ready}</button><button className={knowledgeDocumentFilter === 'ocr' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('ocr')}>待 OCR {knowledgeDocumentCounts.ocr}</button><button className={knowledgeDocumentFilter === 'unsupported' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('unsupported')}>暂不支持 {knowledgeDocumentCounts.unsupported}</button><button className={knowledgeDocumentFilter === 'failed' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('failed')}>解析失败/无文本 {knowledgeDocumentCounts.failed}</button><button className={knowledgeDocumentFilter === 'all' ? 'active' : ''} onClick={() => setKnowledgeDocumentFilter('all')}>全部</button></div>{displayedKnowledgeDocuments.length ? <KnowledgeDocumentList documents={displayedKnowledgeDocuments} expanded={expandedKnowledgeDocuments} onToggle={toggleKnowledgeDocument} onRoleChange={changeKnowledgeRole} onOcr={runKnowledgeOcr} onRefine={openDocumentCloudRefinement} onEditLocation={openPageLocationEditor} versionGroups={versionGroupsByMaterialId} onVersionChange={switchMaterialVersion} aiConfigured={aiConfig.configured} busyKey={busyKey} /> : <p className="muted">当前分类没有资料。可切换上方筛选查看待 OCR、暂不支持或解析失败的文件。</p>}</div><div className="panel knowledge-panel concept-evidence-panel"><div className="panel-title"><div><h2>课程知识点</h2><p>自评与测试证据并列显示，测试不会覆盖你的主动判断。</p></div><span>{visibleKnowledgeConcepts.length} 个</span></div>{visibleKnowledgeConcepts.length ? <div className="knowledge-concept-list">{visibleKnowledgeConcepts.map((concept) => { const evidence = conceptEvidence[concept.id]; const courseId = activeKnowledgeCourseId ?? concept.courseIds[0]; return <article className={`concept-evidence-row ${evidence?.status ?? 'unassessed'}`} key={concept.id}><div><strong>{concept.title}</strong><span>{concept.aliases?.length ? `合并别名：${concept.aliases.join('、')} · ` : ''}{concept.sourceIds.length} 份课件来源 · {concept.locations?.length ? `${concept.locations.length} 处页级定位` : '尚未定位具体页'} · 最近复习 {evidence?.lastReviewedAt ? new Date(evidence.lastReviewedAt).toLocaleDateString() : '暂无记录'}</span></div><span className={`concept-evidence-status ${evidence?.status ?? 'unassessed'}`}>{conceptEvidenceLabels[evidence?.status ?? 'unassessed']}</span><div className="concept-evidence-values"><small>自评：{['未评估', '陌生', '模糊', '理解', '掌握'][evidence?.selfRating ?? 0]}</small><small>测试：{evidence?.latestTestScore === null || evidence?.latestTestScore === undefined ? '未覆盖' : `${evidence.latestTestScore}% · ${evidence.latestTestQuestions} 题`}</small></div>{courseId ? <button onClick={() => openConceptReview(concept.id, courseId)}>{concept.locations?.length ? '从定位页复习' : evidence && conceptNeedsReview(evidence) ? '复习薄弱点' : '加入复习'}</button> : null}</article> })}</div> : <p className="muted">课程知识点由课件的资料级知识点汇总而来。教材不会自动扩大这个列表。</p>}</div></div>}
           </section>}
 
-          {section === 'map' && <section><div className="page-heading"><div><span className="eyebrow">知识图谱</span><h1>在一张可自由移动的学习地图中浏览知识。</h1><p>课程概览默认不堆叠全部关系线；知识点颜色显示自评与测试证据，描边表示已经被快速测试覆盖。</p></div></div>{knowledgeIndex?.documents.length ? <KnowledgeMap documents={knowledgeIndex.documents} concepts={knowledgeIndex.concepts} ratings={study.knowledgeRatings} evidence={conceptEvidence} courseFilter={mapCourseFilter} onCourseFilterChange={setMapCourseFilter} onOpenDocument={openMapDocumentInReview} onReviewConcept={openConceptReview} /> : <div className="panel empty-action-panel"><Network size={26} /><div><h2>还没有可绘制的知识图谱</h2><p>先在知识库中构建或更新课程资料。只有已解析或已 OCR 的资料会进入图谱。</p></div><button className="primary-button" onClick={() => setSection('knowledge')}>打开知识库</button></div>}</section>}
+          {section === 'map' && <section><div className="page-heading"><div><span className="eyebrow">知识图谱</span><h1>在一张可自由移动的学习地图中浏览知识。</h1><p>课程概览默认不堆叠全部关系线；知识点颜色显示自评与测试证据，描边表示已经被快速测试覆盖。</p></div></div>{knowledgeIndex?.documents.length ? <KnowledgeMap documents={knowledgeIndex.documents} concepts={knowledgeIndex.concepts} ratings={study.knowledgeRatings} evidence={conceptEvidence} courseFilter={mapCourseFilter} onCourseFilterChange={(value) => chooseCourseFilter(value, setMapCourseFilter)} onOpenDocument={openMapDocumentInReview} onReviewConcept={openConceptReview} /> : <div className="panel empty-action-panel"><Network size={26} /><div><h2>还没有可绘制的知识图谱</h2><p>先在知识库中构建或更新课程资料。只有已解析或已 OCR 的资料会进入图谱。</p></div><button className="primary-button" onClick={() => setSection('knowledge')}>打开知识库</button></div>}</section>}
 
-          {section === 'review' && <section><div className="page-heading"><div><span className="eyebrow">期末复习</span><h1>先选你真正要复习的内容，再进入专注会话。</h1><p>你可以手动勾选资料或知识点；若不选，系统会按自评、资料来源和期末日期生成建议路线。会话内提供资料阅读、AI 问答与番茄钟。</p></div><div className="review-controls"><select value={reviewCourseFilter} onChange={(event) => setReviewCourseFilter(event.target.value)}><option value="current">{selectedCourse ? '当前课程：' + selectedCourse.name : '当前课程（未选择）'}</option>{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select><label>期末日期<input type="date" value={reviewExamDate} onChange={(event) => setReviewExamDate(event.target.value)} /></label></div></div>{!activeReviewCourseId || !reviewWorkspaceDocuments.length ? <div className="panel empty-action-panel"><Network size={26} /><div><h2>{knowledgeIndex?.stats.parsed ? '当前课程还没有已解析资料' : '先构建本地知识库'}</h2><p>请先选择一门课程，并在知识库中构建解析结果。DOCX、旧版 PPT 与 LaTeX 也会在重新构建后纳入。</p></div><button className="primary-button" onClick={() => setSection('knowledge')}>打开知识库</button></div> : <><div className="growth-stats review-stats"><div><span>已自评</span><strong>{reviewRatedCount}/{reviewConcepts.length}</strong><small>用于系统规划，不会覆盖成绩</small></div><div><span>当前掌握度</span><strong>{reviewMastery}%</strong><small>来自你对知识点的真实判断</small></div><div><span>系统建议</span><strong>{reviewWeakCount}</strong><small>{reviewDailyTarget ? `距期末 ${reviewDaysLeft} 天，建议每天 ${reviewDailyTarget} 个` : '设置期末日期后拆分每日目标'}</small></div></div><ReviewWorkspace courseName={study.courses.find((course) => course.id === activeReviewCourseId)?.name ?? '当前课程'} documents={reviewWorkspaceDocuments} concepts={reviewConcepts} ratings={study.knowledgeRatings} selection={reviewSelection} session={reviewSession} onSelectionChange={saveReviewSelection} onSessionChange={saveReviewSession} onRate={setConceptRating} aiConfigured={aiConfig.configured} onOpenAiSettings={() => setShowAiSettings(true)} focusMinutes={appPreferences.focusMinutes} breakMinutes={appPreferences.breakMinutes} /></>}</section>}
+          {section === 'review' && <section><div className="page-heading"><div><span className="eyebrow">期末复习</span><h1>先选你真正要复习的内容，再进入专注会话。</h1><p>你可以手动勾选资料或知识点；若不选，系统会按自评、资料来源和期末日期生成建议路线。会话内提供资料阅读、AI 问答与番茄钟。</p></div><div className="review-controls"><select value={activeReviewCourseId ?? ''} onChange={(event) => chooseCourseFilter(event.target.value, setReviewCourseFilter)}>{!activeReviewCourseId ? <option value="">请选择课程</option> : null}{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select><label>期末日期<input type="date" value={reviewExamDate} onChange={(event) => setReviewExamDate(event.target.value)} /></label></div></div>{!activeReviewCourseId || !reviewWorkspaceDocuments.length ? <div className="panel empty-action-panel"><Network size={26} /><div><h2>{knowledgeIndex?.stats.parsed ? '当前课程还没有已解析资料' : '先构建本地知识库'}</h2><p>请先选择一门课程，并在知识库中构建解析结果。DOCX、旧版 PPT 与 LaTeX 也会在重新构建后纳入。</p></div><button className="primary-button" onClick={() => setSection('knowledge')}>打开知识库</button></div> : <><div className="growth-stats review-stats"><div><span>已自评</span><strong>{reviewRatedCount}/{reviewConcepts.length}</strong><small>用于系统规划，不会覆盖成绩</small></div><div><span>当前掌握度</span><strong>{reviewMastery}%</strong><small>来自你对知识点的真实判断</small></div><div><span>系统建议</span><strong>{reviewWeakCount}</strong><small>{reviewDailyTarget ? `距期末 ${reviewDaysLeft} 天，建议每天 ${reviewDailyTarget} 个` : '设置期末日期后拆分每日目标'}</small></div></div><ReviewWorkspace courseName={study.courses.find((course) => course.id === activeReviewCourseId)?.name ?? '当前课程'} documents={reviewWorkspaceDocuments} concepts={reviewConcepts} ratings={study.knowledgeRatings} selection={reviewSelection} session={reviewSession} onSelectionChange={saveReviewSelection} onSessionChange={saveReviewSession} onRate={setConceptRating} aiConfigured={aiConfig.configured} onOpenAiSettings={() => setShowAiSettings(true)} focusMinutes={appPreferences.focusMinutes} breakMinutes={appPreferences.breakMinutes} /></>}</section>}
 
           {section === 'schedule' && <section className="review-calendar-page">
             <div className="page-heading"><div><span className="eyebrow">复习日程</span><h1>把间隔建议整理成真正可执行的一周。</h1><p>拖动任务即可改期；多选后可以顺延、移到周末或平均分散。掌握确认和快速测试作为历史证据保留，不会被拖动。</p></div><div className="calendar-navigation"><button onClick={() => changeCalendarAnchor(shiftDate(calendarWeek[0], -7))}>上一周</button><button onClick={() => changeCalendarAnchor(reviewToday)}>今天</button><button onClick={() => changeCalendarAnchor(shiftDate(calendarWeek[0], 7))}>下一周</button></div></div>
@@ -2096,7 +2480,7 @@ export default function App() {
           {section === 'focus' && <section><div className="page-heading"><div><span className="eyebrow">专注计时</span><h1>给当前学习留出一段不被打断的时间。</h1><p>期末复习会话内也有同一套番茄钟；这里提供独立入口，适合整理资料、阅读或完成作业时使用。</p></div></div><div className="focus-panel"><span className="eyebrow">{focusPhase === 'focus' ? '专注阶段' : '休息阶段'} · {appPreferences.focusMinutes} 分钟专注 / {appPreferences.breakMinutes} 分钟休息</span><strong>{String(Math.floor(focusSeconds / 60)).padStart(2, '0')}:{String(focusSeconds % 60).padStart(2, '0')}</strong><div><button className="primary-button" onClick={() => setFocusRunning((value) => !value)}>{focusRunning ? '暂停' : focusPhase === 'focus' ? '开始专注' : '开始休息'}</button><button className="outline-button" onClick={() => { setFocusRunning(false); setFocusSeconds((focusPhase === 'focus' ? appPreferences.focusMinutes : appPreferences.breakMinutes) * 60) }}>重置</button><button className="outline-button" onClick={() => setSection('review')}>进入期末复习</button></div></div></section>}
 
           {section === 'growth' && <section className="growth-page">
-            <div className="page-heading"><div><span className="eyebrow">成长面板 2.0</span><h1>用学习证据，看见自己真正完成了什么。</h1><p>接触、理解确认和测试验证分开统计；每日状态从启用后开始留存，没有记录的日期不会补造数据。</p></div><div className="growth-controls"><select value={growthCourseFilter} onChange={(event) => setGrowthCourseFilter(event.target.value)}><option value="all">全部课程趋势</option>{growthCourseMetrics.map((course) => <option key={course.courseId} value={course.courseId}>{course.courseName}</option>)}</select><div className="growth-range"><button className={growthRange === 7 ? 'active' : ''} onClick={() => setGrowthRange(7)}>最近 7 天</button><button className={growthRange === 30 ? 'active' : ''} onClick={() => setGrowthRange(30)}>最近 30 天</button></div></div></div>
+            <div className="page-heading"><div><span className="eyebrow">成长面板 2.0</span><h1>用学习证据，看见自己真正完成了什么。</h1><p>接触、理解确认和测试验证分开统计；每日状态从启用后开始留存，没有记录的日期不会补造数据。</p></div><div className="growth-controls"><select value={growthCourseFilter} onChange={(event) => chooseCourseFilter(event.target.value, setGrowthCourseFilter)}><option value="all">全部课程趋势</option>{growthCourseMetrics.map((course) => <option key={course.courseId} value={course.courseId}>{course.courseName}</option>)}</select><div className="growth-range"><button className={growthRange === 7 ? 'active' : ''} onClick={() => setGrowthRange(7)}>最近 7 天</button><button className={growthRange === 30 ? 'active' : ''} onClick={() => setGrowthRange(30)}>最近 30 天</button></div></div></div>
             <div className="growth-stats growth-evidence-stats">
               <div><span>有记录的学习日</span><strong>{growthActiveDays}</strong><small>仅统计当前时间范围内真实留下的操作</small></div>
               <div><span>已完成快速测试</span><strong>{completedQuickTests.length}</strong><small>{quickTestAverage === null ? '完成第一次测试后显示正确率' : `平均正确率 ${quickTestAverage}%`}</small></div>
@@ -2172,16 +2556,56 @@ export default function App() {
           </section>}
         </div>
       </main>
+      {latestRefinementJob ? <button className={`refinement-task-chip ${latestRefinementJob.status}`} onClick={() => setShowRefinementTaskPanel(true)}><span><Network size={15} /></span><span><strong>{refinementJobStatusLabel(latestRefinementJob.status)}</strong><small>{latestRefinementJob.progress.completed}/{latestRefinementJob.progress.total} · {latestRefinementJob.mode === 'original' ? '自适应 AI 精炼' : '旧版兼容任务'}</small></span>{['running', 'pausing', 'cancelling'].includes(latestRefinementJob.status) ? <RefreshCw className="spin" size={14} /> : <ChevronRight size={14} />}</button> : null}
+      {showRefinementTaskPanel && latestRefinementJob ? <aside className="refinement-task-panel">
+        <div className="refinement-task-head"><div><span className="eyebrow">自适应 AI 精炼任务</span><h2>{refinementJobStatusLabel(latestRefinementJob.status)}</h2></div><button onClick={() => setShowRefinementTaskPanel(false)}><X size={16} /></button></div>
+        <div className="refinement-task-summary"><div><strong>{latestRefinementJob.progress.completed}/{latestRefinementJob.progress.total}</strong><span>已完成资料</span></div><div><strong>{latestRefinementJob.failed.length}</strong><span>失败项目</span></div><div><strong>{latestRefinementJob.mode === 'original' ? latestRefinementJob.materialIds.length : latestRefinementJob.checkpointedIds.length}</strong><span>{latestRefinementJob.mode === 'original' ? '自适应任务' : '旧版断点'}</span></div></div>
+        <div className="refinement-task-current"><span>{latestRefinementJob.currentMaterialId ? '当前资料' : '任务状态'}</span><strong>{latestRefinementJob.progress.title || refinementJobStatusLabel(latestRefinementJob.status)}</strong>{latestRefinementJob.currentMaterialId && latestRefinementJob.progress.itemTotal ? <small>当前阶段 {Math.floor(latestRefinementJob.progress.itemCompleted ?? 0)}/{latestRefinementJob.progress.itemTotal}</small> : null}</div>
+        {latestRefinementJob.finalizationError ? <div className="refinement-finalization-error"><strong>课程知识点归并未完成</strong><span>{latestRefinementJob.finalizationError}</span></div> : null}
+        <div className="refinement-task-items">{latestRefinementJob.items.map((item) => <article className={item.completed ? 'completed' : item.failed ? 'failed' : item.materialId === latestRefinementJob.currentMaterialId ? 'running' : ''} key={item.materialId}><span>{item.completed ? '✓' : item.failed ? '!' : item.materialId === latestRefinementJob.currentMaterialId ? '…' : '·'}</span><div><strong title={item.title}>{item.title}</strong><small>{item.completed ? '已保存 AI 精炼结果' : item.failed ? item.failed : item.checkpointed ? '已有可恢复的分页断点' : '等待自动选择精炼方式'}</small></div></article>)}</div>
+        <div className="refinement-task-actions">{latestRefinementJob.status === 'running' ? <><button className="outline-button" disabled={busyKey === 'refinement-control'} onClick={() => void controlRefinementJob('pause', latestRefinementJob.id)}>安全暂停</button><button className="danger-button" disabled={busyKey === 'refinement-control'} onClick={() => { if (window.confirm('立即停止会中断当前上传或分析请求；已经完成的文件和分页断点会保留。是否继续？')) void controlRefinementJob('cancel', latestRefinementJob.id) }}>立即停止</button></> : null}{['pausing', 'cancelling'].includes(latestRefinementJob.status) ? <span>正在等待任务到达安全状态…</span> : null}{['paused', 'interrupted', 'completed_with_errors', 'failed'].includes(latestRefinementJob.status) ? <><button className="primary-button" disabled={busyKey === 'refinement-control'} onClick={() => void controlRefinementJob('resume', latestRefinementJob.id)}>继续未完成文件</button><button className="outline-button" disabled={busyKey === 'refinement-control'} onClick={() => { if (window.confirm('重新开始会重新处理本任务选择的全部课件，并替换已有精炼结果。是否继续？')) void controlRefinementJob('restart', latestRefinementJob.id) }}>全部重新开始</button></> : null}{!['running', 'pausing', 'cancelling'].includes(latestRefinementJob.status) ? <button className="text-button" disabled={busyKey === 'refinement-control'} onClick={() => void controlRefinementJob('dismiss', latestRefinementJob.id)}>移除任务记录</button> : null}</div>
+      </aside> : null}
       {showCommandCenter && <div className="command-center-backdrop" onMouseDown={closeCommandCenter}><div className="command-center" onMouseDown={(event) => event.stopPropagation()}><div className="command-center-search"><Search size={19} /><input ref={commandInputRef} value={commandQuery} onChange={(event) => { setCommandQuery(event.target.value); setCommandSelectionIndex(0) }} placeholder="搜索课程、资料正文、知识点、作业或输入 > 查找命令" /><kbd>Esc</kbd></div><div className="command-center-meta"><span>{commandQuery.trim() ? `${commandCenterResults.length} 个结果` : '常用命令与页面快捷键'}</span>{bodySearchBusy ? <em><RefreshCw className="spin" size={11} />正在搜索本地资料正文</em> : commandQuery.trim().length >= 2 && !commandQuery.trim().startsWith('>') ? <em>已同时检索本地知识库正文</em> : <em>输入 &gt; 只搜索命令</em>}</div><div className="command-center-results">{commandCenterResults.length ? commandCenterResults.map((entry, index) => { const Icon = entry.kind === 'command' ? CommandIcon : entry.kind === 'course' ? GraduationCap : entry.kind === 'material' ? (study.materials.find((material) => material.id === entry.materialId)?.kind === 'folder' ? Folder : FileText) : entry.kind === 'concept' ? Network : entry.kind === 'assignment' ? Send : CalendarDays; const kindLabel = { command: '操作', course: '课程', material: '资料', concept: '知识点', assignment: '作业', review: '复习记录' }[entry.kind]; return <button className={commandSelectionIndex === index ? 'selected' : ''} key={entry.id} onMouseEnter={() => setCommandSelectionIndex(index)} onClick={() => executeSearchEntry(entry)}><span className={`command-result-icon ${entry.kind}`}><Icon size={15} /></span><span className="command-result-content"><strong>{entry.title}{entry.completedCourse ? <i>已结课</i> : null}</strong><small>{entry.bodySnippet ? `正文：${entry.bodySnippet}` : entry.subtitle}</small></span><span className="command-result-kind">{kindLabel}</span>{entry.shortcut ? <kbd>{entry.shortcut}</kbd> : <ChevronRight size={14} />}</button> }) : <div className="command-center-empty"><Search size={24} /><strong>没有找到相关内容</strong><span>可以尝试课程代码、原文件名、知识点名称，或输入 &gt; 查看命令。</span></div>}</div><div className="command-center-footer"><span><kbd>↑</kbd><kbd>↓</kbd>选择</span><span><kbd>Enter</kbd>打开</span>{commandCenterShortcut ? <span><kbd>{commandCenterShortcut}</kbd>唤起</span> : <span>快捷键入口已关闭</span>}<button onClick={() => { closeCommandCenter(); setSection('settings') }}>管理快捷键</button></div></div></div>}
       {analyzedAssignment && <div className="modal-backdrop" onMouseDown={() => !['assignment-details:' + analyzedAssignment.id, 'assignment-files:' + analyzedAssignment.id, 'assignment-ai-match:' + analyzedAssignment.id, 'assignment-file-remove:' + analyzedAssignment.id].includes(busyKey ?? '') && setAssignmentAnalysisId(null)}><div className="modal assignment-analysis-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" disabled={['assignment-details:' + analyzedAssignment.id, 'assignment-files:' + analyzedAssignment.id, 'assignment-ai-match:' + analyzedAssignment.id, 'assignment-file-remove:' + analyzedAssignment.id].includes(busyKey ?? '')} onClick={() => setAssignmentAnalysisId(null)}><X size={16} /></button><span className="eyebrow">作业分析 · {courseNames.get(analyzedAssignment.courseId) ?? analyzedAssignment.sourceCourseName}</span><h2>{analyzedAssignment.title}</h2><p className="modal-note">Gradescope 作业请先在网页中自行下载 Original / Graded Copy，再添加作业文件。点击“AI 匹配知识点”时，应用会本地解析该附件，并仅把题目文本和候选知识点发送给 AI；建议必须由你确认。</p><div className="assignment-analysis-actions">{analyzedAssignment.source === 'Blackboard' ? <button className="outline-button" disabled={busyKey === 'assignment-details:' + analyzedAssignment.id} onClick={() => void readAssignmentDetails()}>{busyKey === 'assignment-details:' + analyzedAssignment.id ? '读取中…' : analyzedAssignment.detailsText ? '重新读取题目说明' : '从平台读取题目说明'}</button> : null}<button className="primary-button" disabled={(!analyzedAssignment.detailsText?.trim() && !analyzedAssignment.files?.length) || busyKey === 'assignment-ai-match:' + analyzedAssignment.id} onClick={() => void requestAssignmentAiMatch()}>{busyKey === 'assignment-ai-match:' + analyzedAssignment.id ? 'AI 匹配中…' : assignmentAiMatch ? '重新 AI 匹配' : 'AI 匹配知识点'}</button><button className="outline-button" onClick={() => openSubmission(analyzedAssignment.url)}>打开作业页面</button></div><div className="assignment-file-section"><div><strong>作业文件</strong><span>可在 Gradescope 下载 Original / Graded Copy 后添加；文件只复制到本地资料库。</span></div><button className="outline-button" disabled={busyKey === 'assignment-files:' + analyzedAssignment.id} onClick={() => void addAssignmentFiles()}>{busyKey === 'assignment-files:' + analyzedAssignment.id ? '添加中…' : '添加作业文件'}</button>{analyzedAssignment.files?.length ? <div className="assignment-file-list">{analyzedAssignment.files.map((file) => <article key={file.id}><FileText size={14} /><span><strong>{file.title}</strong><small>{file.type} · {new Date(file.addedAt).toLocaleDateString()}</small></span><button onClick={() => void openAssignmentFile(file.localPath)}>打开</button><button disabled={busyKey === 'assignment-file-remove:' + analyzedAssignment.id} onClick={() => void removeAssignmentFile(file)}>移除关联</button></article>)}</div> : <small className="assignment-file-empty">尚未添加文件。</small>}</div>{analyzedAssignment.detailsText ? <details className="assignment-details-text"><summary>已读取题目说明 · {analyzedAssignment.detailsFetchedAt ? new Date(analyzedAssignment.detailsFetchedAt).toLocaleString() : '本机缓存'}</summary><p>{analyzedAssignment.detailsText}</p></details> : <p className="assignment-analysis-hint">尚未提供网页题目说明。对于 Gradescope，请下载作业 PDF 后点击“添加作业文件”；系统会在你点击 AI 按钮时从附件本地提取文字，不会自行推荐知识点。</p>}{!knowledgeIndex ? <div className="assignment-analysis-empty"><strong>尚未构建本课程知识库</strong><span>请先缓存或导入课程资料，并在“知识库”中完成构建，再回来分析作业。</span><button className="primary-button" onClick={() => { setAssignmentAnalysisId(null); setKnowledgeCourseFilter(analyzedAssignment.courseId); setSection('knowledge') }}>打开知识库</button></div> : !assignmentCourseConcepts.length ? <div className="assignment-analysis-empty"><strong>当前课程没有可用知识点</strong><span>请在知识库中解析课件或检查资料是否被设为“教材/参考资料”。</span></div> : <><div className={'assignment-ai-result ' + (assignmentAiMatch ? 'ready' : assignmentAiMatchStale ? 'stale' : '')}><strong>{assignmentAiMatch ? 'AI 已给出待确认的知识点建议' : assignmentAiMatchStale ? '题目说明已更新，请重新让 AI 匹配' : '尚未请求 AI 匹配'}</strong><span>{assignmentAiMatch ? `模型：${assignmentAiMatch.model} · ${new Date(assignmentAiMatch.generatedAt).toLocaleString()}。请在下方核对后保存。` : assignmentAiMatchStale ? '旧的 AI 建议不会继续使用。' : '系统不会根据关键词、自评或课程薄弱项自行选择前置知识。'}</span>{assignmentAiMatch?.explanation ? <p>{assignmentAiMatch.explanation}</p> : null}</div><div className="assignment-concept-picker"><div><strong>确认作业相关知识点</strong><span>只有你勾选并保存的内容会成为该作业的人工映射。</span></div>{assignmentCourseConcepts.map((concept) => <label key={concept.id}><input type="checkbox" checked={assignmentKnowledgeDraft.includes(concept.id)} onChange={() => setAssignmentKnowledgeDraft((current) => current.includes(concept.id) ? current.filter((id) => id !== concept.id) : [...current, concept.id])} /><span>{concept.title}<small>{assignmentAiMatch?.conceptIds.includes(concept.id) ? 'AI 建议：请结合题目说明确认。' : `${concept.sourceIds.length} 份来源课件`}</small></span></label>)}</div><div className="assignment-analysis-footer"><button className="outline-button" onClick={() => saveAssignmentKnowledge([])}>清除人工映射</button><button className="outline-button" onClick={() => saveAssignmentKnowledge()}>确认并保存</button><button className="primary-button" disabled={!assignmentKnowledgeDraft.length} onClick={bringAssignmentKnowledgeToReview}>带入复习选择</button></div></>}</div></div>}
       {deadlineEditorId && <div className="modal-backdrop" onMouseDown={() => setDeadlineEditorId(null)}><div className="modal deadline-editor-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" onClick={() => setDeadlineEditorId(null)}><X size={16} /></button><span className="eyebrow">人工 DDL 修正</span><h2>设置截止时间</h2><p className="modal-note">人工设置会优先于平台同步值，适合 Blackboard 未提供 DDL 或你需要修正平台信息的情况。清空后将恢复使用平台值。</p><label>截止日期与时间<input type="datetime-local" value={deadlineDraft} onChange={(event) => setDeadlineDraft(event.target.value)} /></label><div className="deadline-editor-actions"><button className="outline-button" onClick={() => { setDeadlineDraft(''); saveManualDeadline('') }}>清除人工设置</button><button className="primary-button" onClick={() => saveManualDeadline()}>保存 DDL</button></div></div></div>}
       {courseCompletionId && <div className="modal-backdrop" onMouseDown={() => setCourseCompletionId(null)}><div className="modal course-completion-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" onClick={() => setCourseCompletionId(null)}><X size={16} /></button><span className="eyebrow">课程生命周期</span><h2>将“{study.courses.find((course) => course.id === courseCompletionId)?.name}”标记为已结课？</h2><p className="modal-note">结课后，这门课会停止进入今日复习队列、系统间隔日程和桌面提醒。课程资料、知识库、知识点自评、快速测试、成长统计及历史记录都不会删除，并且可以随时重新开课。</p><label className="course-completion-option"><input type="checkbox" checked={removeCourseManualSchedule} onChange={(event) => setRemoveCourseManualSchedule(event.target.checked)} /><span><strong>同时移除今天及未来的手动日程</strong><small>过去的完成记录仍然保留；重新开课后不会自动恢复已移除的手动日程。</small></span></label><div className="course-completion-actions"><button className="outline-button" onClick={() => setCourseCompletionId(null)}>取消</button><button className="primary-button" onClick={confirmCourseCompletion}>确认结课</button></div></div></div>}
-      {showAiSettings && <div className="modal-backdrop" onMouseDown={() => !['ai-settings', 'ai-test'].includes(busyKey ?? '') && setShowAiSettings(false)}><div className="modal ai-settings-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" disabled={['ai-settings', 'ai-test'].includes(busyKey ?? '')} onClick={() => setShowAiSettings(false)}><X size={16} /></button><span className="eyebrow">可选云端 AI</span><h2>配置知识点精炼模型</h2><p className="modal-note">仅在你点击某一份资料的“AI 精炼”后，应用才会发送该资料的已提取文本；不会自动上传课程文件。连通性测试只发送一条最小文本请求，不会发送课程资料。</p><label>兼容 API 地址<input value={aiConfig.baseUrl} onChange={(event) => { setAiConfig((current) => ({ ...current, baseUrl: event.target.value })); setAiConnectionState(null) }} placeholder="例如：https://api.openai.com/v1" /></label><label>模型名称<input value={aiConfig.model} onChange={(event) => { setAiConfig((current) => ({ ...current, model: event.target.value })); setAiConnectionState(null) }} placeholder="例如：gpt-4.1-mini" /></label><label>API 密钥<input type="password" value={aiApiKey} onChange={(event) => { setAiApiKey(event.target.value); setAiConnectionState(null) }} placeholder={aiConfig.configured ? '留空则使用已加密保存的密钥' : '仅保存在系统安全存储中'} /></label>{aiConnectionState ? <div className={'ai-connection-state ' + aiConnectionState.kind}><span>{aiConnectionState.kind === 'testing' ? '正在测试' : aiConnectionState.kind === 'success' ? '连接成功' : '测试失败'}</span><strong>{aiConnectionState.message}</strong></div> : null}<div className="ai-settings-actions"><button className="outline-button" disabled={['ai-settings', 'ai-test'].includes(busyKey ?? '')} onClick={testAiConnection}>{busyKey === 'ai-test' ? '测试中…' : '测试连接'}</button><button className="primary-button" disabled={['ai-settings', 'ai-test'].includes(busyKey ?? '')} onClick={saveAiConfiguration}>{busyKey === 'ai-settings' ? '保存中…' : '加密保存配置'}</button></div></div></div>}
+      {showBatchRefinement && <div className="modal-backdrop" onMouseDown={() => busyKey !== 'refine-job-start' && setShowBatchRefinement(false)}>
+        <div className="modal batch-refinement-modal" onMouseDown={(event) => event.stopPropagation()}>
+          <button className="close" disabled={busyKey === 'refine-job-start'} onClick={() => setShowBatchRefinement(false)}><X size={16} /></button>
+          <span className="eyebrow">批量 AI 精炼</span><h2>选择需要分析的课件</h2>
+          <p className="modal-note">应用会按当前 API 能力自动选择原件直传或本地分页兼容精炼。DeepSeek、Gemini 等对话接口不会请求不存在的文件上传端点。教材和参考书不会出现在这里，任务开始后可继续使用其他页面。</p>
+          <div className="refinement-cost-estimate"><strong>将分析 {batchRefinementSelection.length} 份课程资料</strong><span>{batchRefinementBytes ? `当前选择约 ${(batchRefinementBytes / 1024 / 1024).toFixed(1)} MB。` : '文件大小将在处理前检查。'} 当前配置：{aiConfig.capabilities?.refinementMode === 'original-file' ? '优先原件直传，接口拒绝时自动回退' : aiConfig.capabilities?.refinementMode === 'structured-pages' || ['deepseek', 'gemini'].includes(aiConfig.provider) ? '本地分页后发送必要文本' : '任务开始时自动检测接口能力'}。</span></div>
+          <div className="batch-refinement-toolbar"><div><strong>已选择 {batchRefinementSelection.length}/{batchRefinementCandidates.length} 份</strong><span>{batchRefinementCurrentCount ? `其中 ${batchRefinementCurrentCount} 份将重新上传并替换精炼结果` : '不会处理未选择的资料'}</span></div><button className="outline-button" disabled={busyKey === 'refine-job-start'} onClick={() => setBatchRefinementSelection(defaultRefinementSelection(batchRefinementCandidates))}>仅选待更新</button><button className="outline-button" disabled={busyKey === 'refine-job-start'} onClick={() => setBatchRefinementSelection((current) => toggleAllRefinementSelection(batchRefinementCandidates, current))}>{batchRefinementCandidates.length > 0 && batchRefinementCandidates.every((document) => batchRefinementSelected.has(document.materialId)) ? '取消全选' : '一键全选'}</button></div>
+          <div className="batch-refinement-list">{batchRefinementCandidates.map((document) => { const state = refinementState(document); const group = versionGroupsByMaterialId.get(document.materialId); return <label className={batchRefinementSelected.has(document.materialId) ? 'selected' : ''} key={document.materialId}><input type="checkbox" disabled={busyKey === 'refine-job-start'} checked={batchRefinementSelected.has(document.materialId)} onChange={() => setBatchRefinementSelection((current) => current.includes(document.materialId) ? current.filter((id) => id !== document.materialId) : [...current, document.materialId])} /><span><strong title={document.title}>{group?.displayTitle ?? document.title}</strong><small>{state === 'current' ? `AI 精炼已完成${document.ai?.model ? ` · ${document.ai.model}` : ''}` : state === 'stale' ? '当前文件版本与 AI 结果不一致' : '尚未进行 AI 精炼'}</small></span><em className={state}>{state === 'current' ? '重新精炼' : state === 'stale' ? '待更新' : '新资料'}</em></label> })}</div>
+          <div className="batch-refinement-actions"><button className="outline-button" disabled={busyKey === 'refine-job-start'} onClick={() => setShowBatchRefinement(false)}>取消</button><button className="primary-button" disabled={busyKey === 'refine-job-start' || !batchRefinementSelection.length} onClick={runBatchCloudRefinement}>{busyKey === 'refine-job-start' ? '正在创建任务…' : `后台精炼 ${batchRefinementSelection.length} 份资料`}</button></div>
+        </div>
+      </div>}
+      {pageLocationEditor && <div className="modal-backdrop" onMouseDown={() => busyKey !== 'page-location' && setPageLocationEditor(null)}>
+        <div className="modal page-location-modal" onMouseDown={(event) => event.stopPropagation()}>
+          <button className="close" disabled={busyKey === 'page-location'} onClick={() => setPageLocationEditor(null)}><X size={16} /></button>
+          <span className="eyebrow">人工校正页级索引</span>
+          <h2>{pageLocationEditor.conceptTitle}</h2>
+          <p className="modal-note" title={pageLocationEditor.documentTitle}>{pageLocationEditor.documentTitle}<br />自动定位只提供辅助，你确认和删除的范围会在重新补索引及资料库迁移后保留。</p>
+          <section className="page-location-section">
+            <div className="page-location-section-head"><strong>已确认范围</strong><span>{pageLocationEditor.locations.length} 处</span></div>
+            {pageLocationEditor.locations.length ? <div className="page-location-ranges">{pageLocationEditor.locations.map((location) => <article key={`${location.kind}:${location.start}:${location.end}`}><div><strong>{knowledgeLocationLabel(location)}</strong><small>{location.manual ? '人工确认' : location.method === 'ai-page-map' ? '页面语义映射' : '本地标题 / 公式匹配'}{location.confidence ? ` · 置信度 ${Math.round(location.confidence * 100)}%` : ''}</small></div><button className="danger-button" disabled={busyKey === 'page-location'} onClick={() => void updatePageLocation('remove', location)}>删除</button></article>)}</div> : <p className="muted">还没有已确认的页码范围。</p>}
+          </section>
+          <section className="page-location-section candidate-section">
+            <div className="page-location-section-head"><strong>待确认候选</strong><span>{pageLocationEditor.candidates.length} 项</span></div>
+            {pageLocationEditor.candidates.length ? <div className="page-location-ranges">{pageLocationEditor.candidates.map((location) => <article key={`${location.kind}:${location.start}:${location.end}`}><div><strong>{knowledgeLocationLabel(location)}</strong><small>{location.evidence || '相似标题、关键词或跨语言语义匹配'}{location.confidence ? ` · 置信度 ${Math.round(location.confidence * 100)}%` : ''}</small></div><div><button className="primary-button" disabled={busyKey === 'page-location'} onClick={() => void updatePageLocation('confirm', location)}>确认</button><button className="outline-button" disabled={busyKey === 'page-location'} onClick={() => void updatePageLocation('reject', location)}>忽略</button></div></article>)}</div> : <p className="muted">没有待确认候选。</p>}
+          </section>
+          <section className="page-location-section manual-location-section">
+            <div className="page-location-section-head"><strong>手动添加范围</strong><span>{pageLocationEditor.pageCount ? `资料共 ${pageLocationEditor.pageCount} 个可索引页面` : '由应用检查范围'}</span></div>
+            <div className="page-location-form"><label>类型<select value={pageLocationEditor.kind} onChange={(event) => setPageLocationEditor((current) => current ? { ...current, kind: event.target.value as KnowledgeLocation['kind'] } : current)}><option value="pdf-page">PDF 页码</option><option value="pptx-slide">PPT 幻灯片</option><option value="docx-section">文档章节</option></select></label><label>开始<input type="number" min="1" max={pageLocationEditor.pageCount || undefined} value={pageLocationDraftStart} onChange={(event) => setPageLocationDraftStart(event.target.value)} placeholder="例如 14" /></label><label>结束<input type="number" min="1" max={pageLocationEditor.pageCount || undefined} value={pageLocationDraftEnd} onChange={(event) => setPageLocationDraftEnd(event.target.value)} placeholder="留空表示单页" /></label><button className="primary-button" disabled={busyKey === 'page-location' || !pageLocationDraftStart} onClick={() => void updatePageLocation('add')}>{busyKey === 'page-location' ? '保存中…' : '添加范围'}</button></div>
+          </section>
+        </div>
+      </div>}
+      {showAiSettings && <div className="modal-backdrop" onMouseDown={() => !['ai-settings', 'ai-test', 'ai-models'].includes(busyKey ?? '') && setShowAiSettings(false)}><div className="modal ai-settings-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" disabled={['ai-settings', 'ai-test', 'ai-models'].includes(busyKey ?? '')} onClick={() => setShowAiSettings(false)}><X size={16} /></button><span className="eyebrow">可选云端 AI</span><h2>配置知识精炼模型</h2><p className="modal-note">选择常用官方服务后会自动填写 API 地址。能力检测会区分对话、模型列表和原件接口：支持 Files + Responses 时优先直传原件，否则自动使用本地分页兼容精炼，不再逐份请求不存在的上传接口。教材和参考书不会进入 AI 精炼。</p><label>AI 服务<select value={aiConfig.provider} onChange={(event) => { const provider = event.target.value as AiProvider; const preset = aiProviderPresets.find((item) => item.id === provider); setAiConfig((current) => ({ ...current, provider, baseUrl: preset?.baseUrl ?? '', model: '', capabilities: undefined, configured: provider === current.provider ? current.configured : false })); setAiModels([]); setAiConnectionState(null) }}>{aiProviderPresets.map((provider) => <option value={provider.id} key={provider.id}>{provider.label}</option>)}</select><small>{aiProviderPresets.find((provider) => provider.id === aiConfig.provider)?.description}</small></label><label>兼容 API 地址<input value={aiConfig.baseUrl} onChange={(event) => { setAiConfig((current) => ({ ...current, baseUrl: event.target.value, provider: current.provider === 'custom' ? 'custom' : current.provider, capabilities: undefined })); setAiModels([]); setAiConnectionState(null) }} placeholder="例如：https://api.openai.com/v1" /></label><label>API 密钥<input type="password" value={aiApiKey} onChange={(event) => { setAiApiKey(event.target.value); setAiConnectionState(null) }} placeholder={aiConfig.configured ? '留空则使用已加密保存的密钥' : '仅保存在系统安全存储中'} /></label><label>模型名称<div className="ai-model-picker"><input list="xuejing-ai-models" value={aiConfig.model} onChange={(event) => { setAiConfig((current) => ({ ...current, model: event.target.value, capabilities: undefined })); setAiConnectionState(null) }} placeholder="可手动填写，或先获取模型列表" /><button type="button" className="outline-button" disabled={busyKey === 'ai-models' || !aiConfig.baseUrl} onClick={loadAiModels}>{busyKey === 'ai-models' ? '读取中…' : '获取模型'}</button></div><datalist id="xuejing-ai-models">{aiModels.map((model) => <option value={model} key={model} />)}</datalist>{aiModels.length ? <small>接口返回 {aiModels.length} 个模型；列表来自服务端，不在应用内硬编码。</small> : null}</label>{aiConfig.capabilities ? <div className="ai-capability-summary"><span className={aiConfig.capabilities.chat ? 'available' : 'missing'}>对话 {aiConfig.capabilities.chat ? '可用' : '不可用'}</span><span className={aiConfig.capabilities.files && aiConfig.capabilities.responses ? 'available' : 'fallback'}>{aiConfig.capabilities.refinementMode === 'original-file' ? '原件直传' : '本地分页兼容'}</span><span>{aiConfig.capabilities.provider === 'openai' ? 'OpenAI' : aiConfig.capabilities.provider === 'deepseek' ? 'DeepSeek' : aiConfig.capabilities.provider === 'gemini' ? 'Gemini' : '自定义接口'}</span></div> : null}{aiConnectionState ? <div className={'ai-connection-state ' + aiConnectionState.kind}><span>{aiConnectionState.kind === 'testing' ? '正在检测' : aiConnectionState.kind === 'success' ? '检测完成' : '检测失败'}</span><strong>{aiConnectionState.message}</strong></div> : null}<div className="ai-settings-actions"><button className="outline-button" disabled={['ai-settings', 'ai-test', 'ai-models'].includes(busyKey ?? '') || !aiConfig.model} onClick={testAiConnection}>{busyKey === 'ai-test' ? '检测中…' : '检测连接与能力'}</button><button className="primary-button" disabled={['ai-settings', 'ai-test', 'ai-models'].includes(busyKey ?? '')} onClick={saveAiConfiguration}>{busyKey === 'ai-settings' ? '保存中…' : '加密保存配置'}</button></div></div></div>}
       {showBlackboardCredentials && <div className="modal-backdrop" onMouseDown={() => busyKey !== 'blackboard-credentials' && setShowBlackboardCredentials(false)}><div className="modal credential-settings-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" disabled={busyKey === 'blackboard-credentials'} onClick={() => setShowBlackboardCredentials(false)}><X size={16} /></button><span className="eyebrow">Blackboard 登录辅助</span><h2>保存学校账号</h2><p className="modal-note">账号和密码只会加密保存在当前 Windows 用户的系统安全存储中。点击“连接 Blackboard”时，应用只会自动填入统一认证页面；验证码、二次认证和最终登录仍由你本人完成。</p><label>账号<input autoComplete="username" value={blackboardCredential.username} onChange={(event) => setBlackboardCredential((current) => ({ ...current, username: event.target.value }))} placeholder="学校统一身份认证账号" /></label><label>密码<input autoComplete="current-password" type="password" value={blackboardPassword} onChange={(event) => setBlackboardPassword(event.target.value)} placeholder={blackboardCredential.configured ? '留空则保留已保存的密码' : '首次保存需要填写密码'} /></label><div className="credential-settings-actions"><button className="outline-button" disabled={busyKey === 'blackboard-credentials' || !blackboardCredential.configured} onClick={clearBlackboardCredentials}>删除已保存信息</button><button className="primary-button" disabled={busyKey === 'blackboard-credentials'} onClick={saveBlackboardCredentials}>{busyKey === 'blackboard-credentials' ? '保存中…' : '加密保存'}</button></div></div></div>}
       {showImport && <div className="modal-backdrop" onMouseDown={() => setShowImport(false)}><div className="modal material-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" onClick={() => setShowImport(false)}><X size={16} /></button><span className="eyebrow">手动导入</span><h2>把已有课程资料收纳进来</h2><p className="modal-note">会复制文件到资料库，保留原文件和你的修改；相同内容会自动去重。</p><label>已有课程<select value={importCourseId} onChange={(event) => setImportCourseId(event.target.value)}><option value="">新建课程…</option>{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>{!importCourseId && <label>新课程名称<input value={newCourseName} onChange={(event) => setNewCourseName(event.target.value)} placeholder="例如：机器学习导论" /></label>}<label>资料存放路径<input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="例如：微信资料/第3周" /></label><label>知识库用途<select value={importKnowledgeRole} onChange={(event) => setImportKnowledgeRole(event.target.value as 'courseware' | 'reference')}><option value="courseware">课件 / 讲义：生成课程知识点</option><option value="reference">教材 / 参考书：只作参考，不自动扩充词条</option></select></label><button className="primary-button wide" disabled={busyKey === 'import'} onClick={importLocalFiles}>{busyKey === 'import' ? '导入中…' : '选择文件并导入'}</button></div></div>}
       {showMigration && <div className="modal-backdrop" onMouseDown={() => busyKey !== 'migrate' && setShowMigration(false)}><div className="modal migration-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" disabled={busyKey === 'migrate'} onClick={() => setShowMigration(false)}><X size={16} /></button><span className="eyebrow">资料库迁移</span><h2>如何处理已有课程资料？</h2><p className="modal-note">旧位置：{vaultRoot}<br />新位置：{migrationTarget}</p>{migrationProgress && <div className="migration-progress"><span>正在处理 {migrationProgress.completed}/{migrationProgress.total}</span><strong>{migrationProgress.title || '正在完成…'}</strong></div>}<button className="primary-button wide" disabled={busyKey === 'migrate'} onClick={() => migrateVault('copy')}>复制到新位置（推荐）</button><button className="outline-button wide" disabled={busyKey === 'migrate'} onClick={() => migrateVault('move')}>迁移并删除已验证的旧副本</button><button className="text-button switch-vault-button" disabled={busyKey === 'migrate'} onClick={() => migrateVault('switch')}>仅切换位置，保留旧资料</button><p className="modal-note">复制或迁移都会逐个校验内容；同一文件不会重复复制。若有文件已被移动，资料页会显示“文件缺失”，可重新缓存。</p></div></div>}
       {showManualAssignment && <div className="modal-backdrop" onMouseDown={() => setShowManualAssignment(false)}><div className="modal manual-assignment-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" onClick={() => setShowManualAssignment(false)}><X size={16} /></button><span className="eyebrow">手动添加作业</span><h2>收纳其他来源的作业</h2><p className="modal-note">适用于课程群、微信、邮箱、线下布置或其他学习平台的作业。保存后会直接进入分析页面，可继续添加题目文件并让 AI 匹配课程知识点。</p><label>归属课程<select value={manualAssignmentCourseId} onChange={(event) => setManualAssignmentCourseId(event.target.value)}><option value="">新建课程…</option>{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>{!manualAssignmentCourseId && <label>新课程名称<input value={manualAssignmentCourseName} onChange={(event) => setManualAssignmentCourseName(event.target.value)} placeholder="例如：数据结构" /></label>}<label>作业名称<input autoFocus value={manualAssignmentTitle} onChange={(event) => setManualAssignmentTitle(event.target.value)} placeholder="例如：Homework 3 / 课程项目" /></label><label>截止日期与时间（可选）<input type="datetime-local" value={manualAssignmentDueAt} onChange={(event) => setManualAssignmentDueAt(event.target.value)} /></label><label>题目说明（可选）<textarea value={manualAssignmentDetails} onChange={(event) => setManualAssignmentDetails(event.target.value)} placeholder="粘贴老师发布的要求、题目或评分说明；保存后可直接用于 AI 匹配。" /></label><label>作业网页链接（可选）<input value={manualAssignmentUrl} onChange={(event) => setManualAssignmentUrl(event.target.value)} placeholder="https://…，可用于打开提交或查看页面" /></label><button className="primary-button wide" disabled={!manualAssignmentTitle.trim() || (!manualAssignmentCourseId && !manualAssignmentCourseName.trim())} onClick={saveManualAssignment}>保存并开始分析</button></div></div>}
-      {showEmailSettings && <div className="modal-backdrop" onMouseDown={() => !['email-settings', 'email-test'].includes(busyKey ?? '') && setShowEmailSettings(false)}><div className="modal email-settings-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" disabled={['email-settings', 'email-test'].includes(busyKey ?? '')} onClick={() => setShowEmailSettings(false)}><X size={16} /></button><span className="eyebrow">可选邮件通知</span><h2>配置 SMTP 邮箱</h2><p className="modal-note">邮件由这台电脑直接连接你的 SMTP 服务器发送。邮箱密码或应用专用密码使用 Windows 安全存储加密；默认关闭，不会上传课程文件或课件正文。</p><div className="email-settings-grid"><label>SMTP 服务器<input value={emailConfig.host} onChange={(event) => { setEmailConfig((current) => ({ ...current, host: event.target.value })); setEmailTestState(null) }} placeholder="例如：smtp.qq.com" /></label><label>端口<input type="number" min="1" max="65535" value={emailConfig.port} onChange={(event) => { setEmailConfig((current) => ({ ...current, port: Number(event.target.value) || 465 })); setEmailTestState(null) }} /></label><label>邮箱账号<input type="email" value={emailConfig.username} onChange={(event) => { setEmailConfig((current) => ({ ...current, username: event.target.value })); setEmailTestState(null) }} placeholder="name@example.com" /></label><label>邮箱密码 / 授权码<input type="password" value={emailPassword} onChange={(event) => { setEmailPassword(event.target.value); setEmailTestState(null) }} placeholder={emailConfig.configured ? '留空则继续使用已加密密码' : '建议使用邮箱应用专用密码'} /></label><label>发件地址（可选）<input type="email" value={emailConfig.from} onChange={(event) => setEmailConfig((current) => ({ ...current, from: event.target.value }))} placeholder="默认使用邮箱账号" /></label><label>接收通知的邮箱<input type="email" value={emailConfig.recipient} onChange={(event) => { setEmailConfig((current) => ({ ...current, recipient: event.target.value })); setEmailTestState(null) }} placeholder="可以与邮箱账号不同" /></label></div><div className="email-setting-switches"><label><input type="checkbox" checked={emailConfig.secure} onChange={(event) => setEmailConfig((current) => ({ ...current, secure: event.target.checked }))} /><span><strong>使用 SSL/TLS</strong><small>465 端口通常开启；587 端口通常关闭并使用 STARTTLS</small></span></label><label><input type="checkbox" checked={emailConfig.notifyCourseUpdates} onChange={(event) => setEmailConfig((current) => ({ ...current, notifyCourseUpdates: event.target.checked }))} /><span><strong>同步变化摘要</strong><small>新课程、资料、作业、DDL、状态和成绩变化</small></span></label><label><input type="checkbox" checked={emailConfig.notifyDeadlines} onChange={(event) => setEmailConfig((current) => ({ ...current, notifyDeadlines: event.target.checked }))} /><span><strong>DDL 临近提醒</strong><small>沿用学径现有的分级截止时间提醒规则</small></span></label><label><input type="checkbox" checked={emailConfig.enabled} onChange={(event) => setEmailConfig((current) => ({ ...current, enabled: event.target.checked }))} /><span><strong>启用自动邮件通知</strong><small>关闭后仍保留配置，也可以继续发送测试邮件</small></span></label></div>{emailTestState ? <div className={'ai-connection-state ' + emailTestState.kind}><span>{emailTestState.kind === 'testing' ? '正在测试' : emailTestState.kind === 'success' ? '发送成功' : '测试失败'}</span><strong>{emailTestState.message}</strong></div> : null}<div className="ai-settings-actions"><button className="outline-button" disabled={['email-settings', 'email-test'].includes(busyKey ?? '')} onClick={testEmailConfiguration}>{busyKey === 'email-test' ? '发送中…' : '发送测试邮件'}</button><button className="primary-button" disabled={['email-settings', 'email-test'].includes(busyKey ?? '')} onClick={saveEmailConfiguration}>{busyKey === 'email-settings' ? '保存中…' : '加密保存配置'}</button></div></div></div>}
+      {showEmailSettings && <div className="modal-backdrop" onMouseDown={() => !['email-settings', 'email-test'].includes(busyKey ?? '') && setShowEmailSettings(false)}><div className="modal email-settings-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" disabled={['email-settings', 'email-test'].includes(busyKey ?? '')} onClick={() => setShowEmailSettings(false)}><X size={16} /></button><span className="eyebrow">可选邮件通知</span><h2>配置 SMTP 邮箱</h2><p className="modal-note">首次同步只发送一条导入摘要；后续资料更新按课程聚合，不会为数百份文件逐封发送邮件。</p><div className="email-settings-grid"><label>SMTP 服务器<input value={emailConfig.host} onChange={(event) => { setEmailConfig((current) => ({ ...current, host: event.target.value })); setEmailTestState(null) }} placeholder="例如：smtp.qq.com" /></label><label>端口<input type="number" min="1" max="65535" value={emailConfig.port} onChange={(event) => { setEmailConfig((current) => ({ ...current, port: Number(event.target.value) || 465 })); setEmailTestState(null) }} /></label><label>邮箱账号<input type="email" value={emailConfig.username} onChange={(event) => { setEmailConfig((current) => ({ ...current, username: event.target.value })); setEmailTestState(null) }} placeholder="name@example.com" /></label><label>邮箱密码 / 授权码<input type="password" value={emailPassword} onChange={(event) => { setEmailPassword(event.target.value); setEmailTestState(null) }} placeholder={emailConfig.configured ? '留空则继续使用已加密密码' : '建议使用邮箱应用专用密码'} /></label><label>发件地址（可选）<input type="email" value={emailConfig.from} onChange={(event) => setEmailConfig((current) => ({ ...current, from: event.target.value }))} placeholder="默认使用邮箱账号" /></label><label>接收通知的邮箱<input type="email" value={emailConfig.recipient} onChange={(event) => { setEmailConfig((current) => ({ ...current, recipient: event.target.value })); setEmailTestState(null) }} placeholder="可以与邮箱账号不同" /></label><label>平台变化邮件<select value={emailConfig.syncEmailMode} onChange={(event) => setEmailConfig((current) => ({ ...current, syncEmailMode: event.target.value as SyncEmailMode, notifyCourseUpdates: event.target.value !== 'off' }))}><option value="important">仅重要变化（推荐）</option><option value="daily">每日聚合摘要</option><option value="every_sync">每次同步摘要</option><option value="off">关闭平台变化邮件</option></select></label>{emailConfig.syncEmailMode === 'daily' ? <label>每日摘要发送时间<select value={emailConfig.syncDigestHour} onChange={(event) => setEmailConfig((current) => ({ ...current, syncDigestHour: Number(event.target.value) }))}>{Array.from({ length: 24 }, (_, hour) => <option value={hour} key={hour}>{String(hour).padStart(2, '0')}:00</option>)}</select></label> : null}</div><div className="email-setting-switches"><label><input type="checkbox" checked={emailConfig.secure} onChange={(event) => setEmailConfig((current) => ({ ...current, secure: event.target.checked }))} /><span><strong>使用 SSL/TLS</strong><small>465 端口通常开启；587 端口通常关闭并使用 STARTTLS</small></span></label><label><input type="checkbox" checked={emailConfig.notifyDeadlines} onChange={(event) => setEmailConfig((current) => ({ ...current, notifyDeadlines: event.target.checked }))} /><span><strong>DDL 临近提醒</strong><small>独立于普通同步摘要，继续按设置的 1/3/5/7 天阈值提醒</small></span></label><label><input type="checkbox" checked={emailConfig.enabled} onChange={(event) => setEmailConfig((current) => ({ ...current, enabled: event.target.checked }))} /><span><strong>启用自动邮件通知</strong><small>关闭后仍保留配置，也可以继续发送测试邮件</small></span></label></div>{emailConfig.syncEmailMode === 'daily' && emailDigestQueue.length ? <div className="email-digest-pending">已有 {emailDigestQueue.length} 组变化等待每日摘要发送</div> : null}{emailTestState ? <div className={'ai-connection-state ' + emailTestState.kind}><span>{emailTestState.kind === 'testing' ? '正在测试' : emailTestState.kind === 'success' ? '发送成功' : '测试失败'}</span><strong>{emailTestState.message}</strong></div> : null}<div className="ai-settings-actions"><button className="outline-button" disabled={['email-settings', 'email-test'].includes(busyKey ?? '')} onClick={testEmailConfiguration}>{busyKey === 'email-test' ? '发送中…' : '发送测试邮件'}</button><button className="primary-button" disabled={['email-settings', 'email-test'].includes(busyKey ?? '')} onClick={saveEmailConfiguration}>{busyKey === 'email-settings' ? '保存中…' : '加密保存配置'}</button></div></div></div>}
       {toast && <div className="toast">{toast}</div>}
       {showLaunchAnimation && <div className="launch-splash" onClick={() => setShowLaunchAnimation(false)} role="presentation"><div className="launch-mark">径</div><strong>学径</strong><span>把分散的学习信息连成路径</span></div>}
     </div>

@@ -2,7 +2,7 @@
 
 面向本科生的本地优先学习中枢：聚合 Blackboard、Gradescope、课程资料、作业截止时间与期末复习工作流，帮助学生少在多个平台之间切换，也能从真实课件出发梳理知识与复习进度。
 
-当前正式版：`1.0.0`。本项目是 Electron + React + TypeScript 的 Windows 桌面应用。
+当前正式版：`1.1.0`。本项目是 Electron + React + TypeScript 的 Windows 桌面应用。
 
 ## 免安装测试
 
@@ -23,7 +23,9 @@ release\win-unpacked\学径.exe
 - 设置中心支持可选后台自动同步：可分别同步 Blackboard/Gradescope，选择 30 分钟、1 小时、3 小时或 6 小时间隔，并配置启动同步与跨午夜免打扰时段。登录过期后停止请求并写入学习收件箱，重新登录后恢复。
 - DDL 邮件支持提前 1/3/5/7 天多选阈值。同一作业、当前 DDL 和阈值只提醒一次；错过多个较早阈值时只发送当前最近的一档，多项作业合并为一封摘要邮件。
 - 识别和管理 DDL，支持状态修正、手动完成、提交页跳转和应用运行期间的 Windows 桌面提醒；Gradescope 作业由用户在网页下载后手动导入，应用会缓存到该作业专属目录，并按用户请求解析附件文本交由 AI 匹配课程知识点、确认后带入复习。
-- 解析 PDF、DOCX、PPTX、旧版 PPT 与 LaTeX；支持扫描 PDF 的本地单份/批量 OCR，以及可选的云端 AI 知识点精炼。
+- 解析 PDF、DOCX、PPTX、旧版 PPT 与 LaTeX；支持扫描 PDF 的本地单份/批量 OCR，以及可选的自适应 AI 精炼。支持原件输入的 API 直接分析文件，DeepSeek/Gemini 等对话接口自动使用本地分页兼容流程。教材/参考资料只在本地解析、检索和阅读。
+- AI 设置提供 OpenAI / GPT、DeepSeek、Google Gemini 和自定义接口预设，可动态读取模型列表并检测对话、Files 与 Responses 能力，避免批量任务反复请求不存在的文件端点。
+- 知识库可区分真正的新旧版本、同名不同 Blackboard 资源与来源冲突；默认使用同一来源的最新相近版本，允许手动切换，并按文件哈希恢复各版本 AI 结果。
 - 构建“资料级主题 → 课程知识点 → 来源资料”的知识库和可缩放知识图谱，支持单课程与全部课程聚合、知识点自评。
 - 提供期末复习会话：系统规划或自选资料/知识点、AI 路线建议一键应用、学习进度持久化、番茄钟、课程问答和沉浸模式。
 - 在复习会话内预览 PDF、DOCX 与 PPTX；旧 `.ppt` 以结构化文本与系统默认应用打开作为降级方案。
@@ -77,3 +79,4 @@ npm run package:win
 - [OCR 与云端 AI](docs/OCR_AND_CLOUD_AI.md)：本地 OCR、AI 精炼与数据发送范围。
 - [知识条目筛选](docs/KNOWLEDGE_FILTERING.md)：本地候选主题的筛选原则。
 - [知识库分层](docs/KNOWLEDGE_ARCHITECTURE.md)：资料级主题、课程知识点和知识图谱之间的关系。
+- [Skill 接入设计](docs/SKILL_INTEGRATION.md)：无需智能体的工作流 Skill、模型辅助 Skill 与未来受控智能体的边界。

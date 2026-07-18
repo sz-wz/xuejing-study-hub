@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer, webFrame } = require('electron')
 
 contextBridge.exposeInMainWorld('xuejing', {
   platform: process.platform,
-  version: '1.0.0',
+  version: '1.1.0',
   app: {
     settings: () => ipcRenderer.invoke('app:settings'),
     saveSettings: (payload) => ipcRenderer.invoke('app:save-settings', payload),
@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('xuejing', {
     verifyFiles: (payload) => ipcRenderer.invoke('vault:verify-files', payload),
     matchBlackboardFiles: (payload) => ipcRenderer.invoke('vault:match-blackboard-files', payload),
     repairExtensions: () => ipcRenderer.invoke('vault:repair-extensions'),
+    materialVersions: (payload) => ipcRenderer.invoke('vault:material-versions', payload),
+    cleanupDuplicates: (payload) => ipcRenderer.invoke('vault:cleanup-duplicates', payload),
     importFiles: (payload) => ipcRenderer.invoke('vault:import-files', payload),
     onMigrationProgress: (listener) => {
       const callback = (_event, progress) => listener(progress)
@@ -44,6 +46,15 @@ contextBridge.exposeInMainWorld('xuejing', {
     ocrBatch: (payload) => ipcRenderer.invoke('knowledge:ocr-batch', payload),
     refine: (payload) => ipcRenderer.invoke('knowledge:refine', payload),
     refineBatch: (payload) => ipcRenderer.invoke('knowledge:refine-batch', payload),
+    reindexPages: (payload) => ipcRenderer.invoke('knowledge:reindex-pages', payload),
+    reindexPagesBatch: (payload) => ipcRenderer.invoke('knowledge:reindex-pages-batch', payload),
+    updatePageLocation: (payload) => ipcRenderer.invoke('knowledge:update-page-location', payload),
+    refinementJobs: () => ipcRenderer.invoke('knowledge:refinement-jobs'),
+    startRefinementJob: (payload) => ipcRenderer.invoke('knowledge:start-refinement-job', payload),
+    pauseRefinementJob: (jobId) => ipcRenderer.invoke('knowledge:pause-refinement-job', jobId),
+    cancelRefinementJob: (jobId) => ipcRenderer.invoke('knowledge:cancel-refinement-job', jobId),
+    resumeRefinementJob: (payload) => ipcRenderer.invoke('knowledge:resume-refinement-job', payload),
+    dismissRefinementJob: (jobId) => ipcRenderer.invoke('knowledge:dismiss-refinement-job', jobId),
     documentContent: (payload) => ipcRenderer.invoke('knowledge:document-content', payload),
     search: (payload) => ipcRenderer.invoke('knowledge:search', payload),
     documentFile: (payload) => ipcRenderer.invoke('knowledge:document-file', payload),
@@ -52,11 +63,18 @@ contextBridge.exposeInMainWorld('xuejing', {
       ipcRenderer.on('knowledge:progress', callback)
       return () => ipcRenderer.removeListener('knowledge:progress', callback)
     },
+    onRefinementJobChange: (listener) => {
+      const callback = (_event, job) => listener(job)
+      ipcRenderer.on('knowledge:refinement-job-change', callback)
+      return () => ipcRenderer.removeListener('knowledge:refinement-job-change', callback)
+    },
   },
   ai: {
     settings: () => ipcRenderer.invoke('ai:settings'),
+    presets: () => ipcRenderer.invoke('ai:presets'),
     saveSettings: (payload) => ipcRenderer.invoke('ai:save-settings', payload),
     testConnection: (payload) => ipcRenderer.invoke('ai:test-connection', payload),
+    listModels: (payload) => ipcRenderer.invoke('ai:list-models', payload),
     chat: (payload) => ipcRenderer.invoke('ai:chat', payload),
   },
   email: {

@@ -5,11 +5,13 @@ const path = require('path')
 const JSZip = require('jszip')
 const CFB = require('cfb')
 const { recognizePdf } = require('./ocr.cjs')
+const { PAGE_INDEX_VERSION, applyLocationOverrides, buildPageCards, cloudRangesForConcept, localPageMapping, locationSignature, mergeLocations, pageCardForCloud } = require('./page-index.cjs')
 
 const MAX_PARSE_BYTES = 80 * 1024 * 1024
-const MAX_TEXT_LENGTH = 500_000
-const PARSER_VERSION = 6
-const MAX_OUTLINE_ITEMS = 8
+const MAX_PDF_PARSE_BYTES = 220 * 1024 * 1024
+const MAX_TEXT_LENGTH = 2_000_000
+const PARSER_VERSION = 9
+const MAX_OUTLINE_ITEMS = 12
 
 function indexPath(root) {
   return path.join(root, '.xuejing', 'knowledge-index.json')
@@ -18,9 +20,9 @@ function indexPath(root) {
 async function readKnowledgeIndex(root) {
   try {
     const parsed = JSON.parse(await fsp.readFile(indexPath(root), 'utf8'))
-    return { version: PARSER_VERSION, documents: parsed.documents && typeof parsed.documents === 'object' ? parsed.documents : {}, concepts: Array.isArray(parsed.concepts) ? parsed.concepts : [] }
+    return { version: PARSER_VERSION, documents: parsed.documents && typeof parsed.documents === 'object' ? parsed.documents : {}, concepts: Array.isArray(parsed.concepts) ? parsed.concepts : [], courseConceptAliases: parsed.courseConceptAliases && typeof parsed.courseConceptAliases === 'object' ? parsed.courseConceptAliases : {} }
   } catch {
-    return { version: PARSER_VERSION, documents: {}, concepts: [] }
+    return { version: PARSER_VERSION, documents: {}, concepts: [], courseConceptAliases: {} }
   }
 }
 
@@ -28,6 +30,11 @@ async function writeKnowledgeIndex(root, index) {
   const destination = indexPath(root)
   await fsp.mkdir(path.dirname(destination), { recursive: true })
   await fsp.writeFile(destination, JSON.stringify({ ...index, version: PARSER_VERSION, updatedAt: new Date().toISOString() }, null, 2), 'utf8')
+}
+
+function invalidateCourseAliases(index, courseId) {
+  if (!courseId || !index.courseConceptAliases || !Object.hasOwn(index.courseConceptAliases, courseId)) return
+  delete index.courseConceptAliases[courseId]
 }
 
 function hashFile(filePath) {
@@ -61,9 +68,11 @@ async function extractPptx(buffer) {
   for (const name of slideNames) {
     const xml = await archive.file(name).async('string')
     const fragments = [...xml.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi)].map((match) => decodeXml(match[1])).filter(Boolean)
-    if (fragments.length) slides.push(fragments.join('\n'))
+    const text = fragments.join('\n').trim()
+    const slideNumber = Number(name.match(/slide(\d+)/i)?.[1]) || slides.length + 1
+    if (text) slides.push({ kind: 'pptx-slide', start: slideNumber, end: slideNumber, text })
   }
-  return slides.join('\n')
+  return { text: slides.map((slide) => slide.text).join('\n'), segments: slides }
 }
 
 async function extractDocx(buffer) {
@@ -134,14 +143,48 @@ async function extractPdf(buffer) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
   const pdf = await pdfjs.getDocument({ data: new Uint8Array(buffer), disableWorker: true }).promise
   const pages = []
+  let textLength = 0
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber)
     const content = await page.getTextContent()
-    const text = content.items.map((item) => item.str).join(' ').trim()
-    if (text) pages.push(text)
-    if (pages.join('\n').length >= MAX_TEXT_LENGTH) break
+    const lines = []
+    let current = []
+    let currentY = null
+    for (const item of content.items) {
+      const value = cleanLine(String(item?.str ?? ''))
+      if (!value) continue
+      const y = Number(item?.transform?.[5])
+      if (current.length && Number.isFinite(y) && Number.isFinite(currentY) && Math.abs(y - currentY) > 2.5) {
+        lines.push(current.join(' '))
+        current = []
+      }
+      current.push(value)
+      if (Number.isFinite(y)) currentY = y
+      if (item?.hasEOL) {
+        lines.push(current.join(' '))
+        current = []
+        currentY = null
+      }
+    }
+    if (current.length) lines.push(current.join(' '))
+    const text = lines.map(cleanLine).filter(Boolean).join('\n').trim()
+    if (text) {
+      pages.push({ kind: 'pdf-page', start: pageNumber, end: pageNumber, text })
+      textLength += text.length
+    }
+    if (textLength >= MAX_TEXT_LENGTH) break
   }
-  return pages.join('\n')
+  const chromeCounts = new Map()
+  for (const page of pages) {
+    const lines = page.text.split(/\n+/).map(cleanLine).filter(Boolean)
+    for (const line of [...lines.slice(0, 2), ...lines.slice(-2)]) {
+      const key = line.toLocaleLowerCase().replace(/\d+/g, '#')
+      if (key.length >= 3 && key.length <= 120) chromeCounts.set(key, (chromeCounts.get(key) ?? 0) + 1)
+    }
+  }
+  const repeatedChrome = new Set([...chromeCounts].filter(([, count]) => count >= 3 && count / Math.max(1, pages.length) >= 0.28).map(([key]) => key))
+  const cleanedPages = pages.map((page) => ({ ...page, text: page.text.split(/\n+/).map(cleanLine).filter((line) => !repeatedChrome.has(line.toLocaleLowerCase().replace(/\d+/g, '#'))).join('\n') })).filter((page) => page.text.trim())
+  return { text: cleanedPages.map((item) => item.text).join('\n'), segments: cleanedPages }
 }
 
 function extensionOf(document) {
@@ -183,7 +226,7 @@ function knowledgeRoleOf(document) {
 }
 
 function cleanLine(value) {
-  return value.replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim()
+  return value.replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').replace(/([\u3400-\u9fff])\s+(?=[\u3400-\u9fff])/gu, '$1').replace(/\s+([，。；：？！、])/gu, '$1').trim()
 }
 
 function buildOutline(text, title) {
@@ -209,6 +252,7 @@ function looksLikeContactOrLink(value) {
 
 function stripCourseChrome(value, courseName = '') {
   let line = cleanLine(value)
+    .replace(/^[Ø•◦▪▫◆◇]+\s*/u, '')
     .replace(/^[\s•▪◼◆◇■□*+\-–—·]+/u, '')
     .replace(/^(?:chapter|ch\.?)\s*\d+\s*[:：.、\-–—]?\s*/i, '')
     .replace(/^第\s*\d+\s*[章节]\s*[:：.、\-–—]?\s*/u, '')
@@ -216,12 +260,14 @@ function stripCourseChrome(value, courseName = '') {
     .replace(/(?:授课教师|授课老师|教师|老师)\s*[:：].*$/u, '')
     .replace(/\s*\(?\d+\s*\/\s*\d+\)?\s*$/, '')
     .replace(/\s+(?:page|slide)\s*\d+\s*$/i, '')
+    .replace(/^n\s+(?=[A-Z][a-z])/u, '')
     .trim()
 
   line = line
     .replace(/^\s*\d+\s+(?=(?:chapter|ch\.?|part|outline|summary)\b)/i, '')
     .replace(/^\.\s*\d+\s+/, '')
     .replace(/^\d+\s+(?=[A-Za-z])/, '')
+    .replace(/^\d+(?:\.\d+)*\.\s+(?=[A-Za-z\u3400-\u9fff])/, '')
     .replace(/^(?:chapter|ch\.?)\s*\d+(?:\s*\.\s*\d+)*\s*[:.\-–—]?\s*/i, '')
     .replace(/\s+\d{1,3}\s*$/, '')
     .trim()
@@ -239,6 +285,7 @@ function stripCourseChrome(value, courseName = '') {
   if (courseLabel.length >= 4 && line.toLocaleLowerCase().startsWith(courseLabel.toLocaleLowerCase())) {
     const remainder = line.slice(courseLabel.length).replace(/^\s*[-:：–—]\s*/, '').trim()
     if (remainder) line = remainder
+    else return ''
   }
   return line
 }
@@ -250,6 +297,11 @@ function isStructuralNoise(value) {
   if (/^(?:lecture|lecture slides|slides?|page)\s*(?:#|no\.?|l)?\s*\d+\b/i.test(line)) return true
   if (/^(?:第\s*\d+\s*[章节页]|\(?\d+\s*\/\s*\d+\)?)$/u.test(line)) return true
   if (/^(?:homework|assignment|project|作业|课程介绍|course introduction|lecture notes|slides|outline|contents|目录|blackboard)$/iu.test(line)) return true
+  if (/^(?:example|solution\s+of\s+example|exercise|例\s*\d+|例题|习题)\b/iu.test(line)) return true
+  if (/^(?:series|summary|introduction|overview|conclusion)$/i.test(line)) return true
+  if (/^(?:print|enter|approximate\b|aside\b|part\s+[ivxlcdm]+\b)/i.test(line)) return true
+  if (/^(?:difference|differences|comparison|solution|result)s?\s*:?s*$/i.test(line)) return true
+  if (/^(?:思考题|理解题|复习题|练习题|讨论题|问题与思考)$/u.test(line)) return true
   if (/^(?:[a-z]{1,8}\d+[a-z0-9_-]*|[a-z]+[-_]?(?:lect|lecture|slides?)[-_ ]?\d+.*)$/i.test(line)) return true
   if (/\b(?:instructor|lecturer|professor|teaching assistant)\b/i.test(line)) return true
   if (/(?:授课教师|授课老师|上海科技大学|shanghaitech)/iu.test(line)) return true
@@ -266,54 +318,136 @@ function hasEnoughMeaningfulText(value) {
 function isSentenceLikeEnglish(value) {
   if (/[\u3400-\u9fff]/u.test(value)) return false
   const words = value.match(/[A-Za-z][A-Za-z0-9-]*/g) ?? []
-  if (words.length <= 9) return false
-  return /\b(?:i|you|we|they|it|this|that|is|are|was|were|be|can|will|should|don'?t|doesn'?t)\b/i.test(value)
+  if (words.length <= 5) return false
+  return /\b(?:i|you|we|they|it|this|that|is|are|was|were|be|can|will|should|created|expressed|determine|don'?t|doesn'?t)\b/i.test(value) || /[.?!]$/.test(value.trim())
+}
+
+function isFormulaFragment(value) {
+  const line = cleanLine(value)
+  if (/^=|=$/.test(line)) return true
+  if (/[∅∈]/u.test(line)) return true
+  if (/^[\[({%].*\b(?:which|where|also|is|are)\b/i.test(line)) return true
+  if (/^[\d\s,.;:+\-*/=<>%()[\]{}]+$/u.test(line)) return true
+  if (/^[\d\s,.;:+\-*/=<>%()[\]{}]*else\b/i.test(line)) return true
+  if (/^\d+\s*%?\s+(?:can|is|are|=)/i.test(line)) return true
+  if (/=$/.test(line) && (line.match(/[\p{L}]/gu) ?? []).length < 5) return true
+  if (/[π∑∫√∞≈≠≤≥]/u.test(line) && (line.match(/[\p{L}]/gu) ?? []).length < 10) return true
+  if (/^(?:sin|cos|tan|exp)\b/i.test(line) && /[\d/()π𝜋]/u.test(line)) return true
+  return false
 }
 
 function toConceptTitle(value, courseName = '') {
   const line = stripCourseChrome(value, courseName)
-  if (line.length < 3 || line.length > 96 || isStructuralNoise(line) || !hasEnoughMeaningfulText(line)) return ''
+  if (line.length < 3 || line.length > 96 || isStructuralNoise(line) || isFormulaFragment(line) || !hasEnoughMeaningfulText(line)) return ''
   if (/\b(?:def|class)\s+[A-Za-z_]\w*\s*(?:\(|:)/.test(line)) return ''
   if (/\b(?:big\s+idea|you\s+try|any\s+questions?|next\s+week)\b/i.test(line)) return ''
+  if (/^[a-z]{2,}\b/.test(line)) return ''
+  if (/\b(?:which\s+(?:is|are)|is\s+also)\b/i.test(line)) return ''
+  if (/\b(?:of|and|or|for|to|the|a|an|as)\s*$/i.test(line)) return ''
+  if (/^(?:of|and|or|for|to|the)\b/i.test(line)) return ''
+  if (/[:：]$/u.test(line)) return ''
+  if (/[。？！?]$/u.test(line) && line.length > 28) return ''
+  if (/[?？]$/u.test(line)) return ''
+  if (/[。！!]$/u.test(line) && line.length > 14) return ''
+  if (line.length > 42 && /[\u3400-\u9fff]/u.test(line) && /[，,]|(?:主张|因此|因为|认为|获得|保持|问题)/u.test(line)) return ''
   if (isSentenceLikeEnglish(line)) return ''
   return line
 }
 
-function buildFilteredOutline(text, document) {
-  const seen = new Set()
-  const courseName = document?.courseName ?? ''
-  const outline = []
-  const title = toConceptTitle(String(document?.title ?? '').replace(/\.(?:pdf|pptx|ppt|docx|tex|latex)$/i, ''), courseName)
-  const candidates = title ? [title, ...String(text).split(/\r?\n/)] : String(text).split(/\r?\n/)
-  for (const raw of candidates) {
-    const line = toConceptTitle(raw, courseName)
-    const key = line.toLocaleLowerCase()
-    if (!line || seen.has(key)) continue
-    seen.add(key)
-    outline.push(line)
-    if (outline.length >= MAX_OUTLINE_ITEMS) break
-  }
-  return outline
+function conceptTokens(value) {
+  const normalized = cleanLine(String(value ?? '')).toLocaleLowerCase()
+    .replace(/properties\b/g, 'property')
+    .replace(/systems\b/g, 'system')
+    .replace(/signals\b/g, 'signal')
+    .replace(/transforms\b/g, 'transform')
+    .replace(/equations\b/g, 'equation')
+    .replace(/[()（）\[\]{}:：,，.。/\\\-–—_]+/g, ' ')
+  return normalized.split(/\s+/).filter((token) => token && !['the', 'of', 'and', 'for', 'to', 'a', 'an', '与', '和', '的'].includes(token))
 }
 
-function buildStrictConcepts(documents) {
-  const concepts = new Map()
+function conceptFingerprint(value) {
+  const tokens = conceptTokens(value)
+  if (!tokens.length) return ''
+  const chinese = tokens.filter((token) => /[\u3400-\u9fff]/u.test(token))
+  return chinese.length ? tokens.join('') : [...new Set(tokens)].sort().join(' ')
+}
+
+function conceptTitlesSimilar(left, right) {
+  const leftKey = conceptFingerprint(left)
+  const rightKey = conceptFingerprint(right)
+  if (!leftKey || !rightKey) return false
+  if (leftKey === rightKey) return true
+  const leftTokens = new Set(conceptTokens(left))
+  const rightTokens = new Set(conceptTokens(right))
+  if (!leftTokens.size || !rightTokens.size) return false
+  const overlap = [...leftTokens].filter((token) => rightTokens.has(token)).length
+  const union = new Set([...leftTokens, ...rightTokens]).size
+  return overlap >= 2 && overlap / union >= 0.86
+}
+
+function buildFilteredOutline(text, document, segments = []) {
+  const courseName = document?.courseName ?? ''
+  const title = toConceptTitle(String(document?.title ?? '').replace(/\.(?:pdf|pptx|ppt|docx|tex|latex)$/i, ''), courseName)
+  const rawCandidates = String(text).split(/\r?\n/)
+  for (const segment of Array.isArray(segments) ? segments : []) rawCandidates.push(...String(segment?.text ?? '').split(/\r?\n/).slice(0, 5))
+  const candidates = title ? [title, ...rawCandidates] : rawCandidates
+  const ranked = new Map()
+  for (let index = 0; index < candidates.length; index += 1) {
+    const raw = candidates[index]
+    const line = toConceptTitle(raw, courseName)
+    const key = conceptFingerprint(line)
+    if (!line || !key) continue
+    const existing = ranked.get(key)
+    const rawLine = cleanLine(String(raw))
+    const heading = /^(?:(?:chapter|ch\.?|section|part)\s*\d+|第\s*\d+\s*[章节]|\d+(?:\.\d+){0,3}\s+)/iu.test(rawLine)
+    const compact = line.length <= 55
+    const score = (index === 0 && title === line ? 60 : 0) + (heading ? 18 : 0) + (compact ? 8 : 0) + Math.min(12, existing?.occurrences ?? 0)
+    if (existing) {
+      existing.occurrences += 1
+      existing.score = Math.max(existing.score, score) + 2
+    } else ranked.set(key, { title: line, score, occurrences: 1, index })
+  }
+  return [...ranked.values()].sort((left, right) => right.score - left.score || right.occurrences - left.occurrences || left.index - right.index).slice(0, MAX_OUTLINE_ITEMS).map((item) => item.title)
+}
+
+function resolveCourseAlias(courseAliases, courseId, originalTitle, courseName) {
+  const stored = courseAliases?.[courseId]
+  const groups = Array.isArray(stored) ? stored : Array.isArray(stored?.groups) ? stored.groups : []
+  const key = cleanLine(originalTitle).toLocaleLowerCase()
+  const group = groups.find((item) => [item?.canonical, ...(Array.isArray(item?.aliases) ? item.aliases : [])].some((title) => cleanLine(String(title ?? '')).toLocaleLowerCase() === key))
+  if (!group) return { title: originalTitle, aliases: [] }
+  const title = toConceptTitle(group.canonical, courseName) || originalTitle
+  const aliases = [...new Set((Array.isArray(group.aliases) ? group.aliases : []).map((alias) => toConceptTitle(alias, courseName)).filter(Boolean))]
+  return { title, aliases }
+}
+
+function buildStrictConcepts(documents, courseAliases = {}) {
+  const concepts = []
   for (const document of documents) {
     if (!['parsed', 'ocr'].includes(document.status) || knowledgeRoleOf(document) !== 'courseware') continue
-    const titles = Array.isArray(document.ai?.concepts) && document.ai.concepts.length
-      ? document.ai.concepts.map((concept) => concept.title)
-      : document.outline ?? []
-    for (const rawTitle of titles) {
-      const title = toConceptTitle(rawTitle, document.courseName)
-      const key = title.replace(/\s+/g, ' ').trim().toLocaleLowerCase()
+    const refinedConcepts = Array.isArray(document.ai?.concepts) && document.ai.concepts.length ? document.ai.concepts : null
+    const candidates = refinedConcepts ?? (document.outlineLocations ?? (document.outline ?? []).map((title) => ({ title, locations: [] })))
+    for (const candidate of candidates) {
+      const rawTitle = candidate.title
+      const originalTitle = toConceptTitle(rawTitle, document.courseName)
+      const resolved = resolveCourseAlias(courseAliases, document.courseId, originalTitle, document.courseName)
+      const title = resolved.title
+      const key = conceptFingerprint(title)
       if (!title || !key) continue
-      const existing = concepts.get(key) ?? { id: conceptId(key), title, sourceIds: [], courseIds: [] }
+      const legacyKey = originalTitle.replace(/\s+/g, ' ').trim().toLocaleLowerCase()
+      const existing = concepts.find((concept) => concept.courseIds.includes(document.courseId) && conceptTitlesSimilar(concept.title, title)) ?? { id: conceptId(legacyKey), title, aliases: [], sourceIds: [], courseIds: [], locations: [] }
+      if (!concepts.includes(existing)) concepts.push(existing)
+      for (const alias of [originalTitle, ...resolved.aliases]) {
+        if (alias && existing.title !== alias && !existing.aliases.includes(alias)) existing.aliases.push(alias)
+      }
       if (!existing.sourceIds.includes(document.materialId)) existing.sourceIds.push(document.materialId)
       if (document.courseId && !existing.courseIds.includes(document.courseId)) existing.courseIds.push(document.courseId)
-      concepts.set(key, existing)
+      for (const location of Array.isArray(candidate.locations) ? candidate.locations : []) {
+        if (!existing.locations.some((current) => current.materialId === location.materialId && current.kind === location.kind && current.start === location.start && current.end === location.end)) existing.locations.push(location)
+      }
     }
   }
-  return [...concepts.values()].sort((a, b) => b.sourceIds.length - a.sourceIds.length || a.title.localeCompare(b.title, 'zh-CN'))
+  return concepts.sort((a, b) => b.sourceIds.length - a.sourceIds.length || a.title.localeCompare(b.title, 'zh-CN'))
 }
 
 function conceptId(value) {
@@ -339,20 +473,25 @@ function buildConcepts(documents) {
 async function parseDocument(document) {
   const stat = await fsp.stat(document.localPath)
   if (!stat.isFile()) throw new Error('本地路径不是文件')
-  if (stat.size > MAX_PARSE_BYTES) return { status: 'skipped', error: '文件超过 80 MB，暂未自动解析', hash: await hashFile(document.localPath) }
-  const hash = await hashFile(document.localPath)
   const namedExtension = extensionOf(document)
+  const sizeLimit = namedExtension === '.pdf' ? MAX_PDF_PARSE_BYTES : MAX_PARSE_BYTES
+  if (stat.size > sizeLimit) return { status: 'skipped', error: `文件超过 ${Math.round(sizeLimit / 1024 / 1024)} MB，暂未自动解析`, hash: await hashFile(document.localPath) }
+  const hash = await hashFile(document.localPath)
   const buffer = await fsp.readFile(document.localPath)
   const extension = namedExtension || extensionFromBuffer(buffer)
   if (!isSupportedParserExtension(extension)) return { status: 'unsupported', error: '当前支持 PDF、PPT/PPTX、DOCX 与 LaTeX（.tex）文本提取', hash }
-  const text = extension === '.pdf' ? await extractPdf(buffer)
+  const extracted = extension === '.pdf' ? await extractPdf(buffer)
     : extension === '.pptx' ? await extractPptx(buffer)
       : extension === '.docx' ? await extractDocx(buffer)
         : extension === '.ppt' ? extractLegacyPpt(buffer)
           : extractLatex(buffer)
+  const text = typeof extracted === 'string' ? extracted : extracted.text
+  const segments = typeof extracted === 'string' ? [] : extracted.segments
   const trimmedText = text.slice(0, MAX_TEXT_LENGTH)
   if (!trimmedText.trim()) return { status: extension === '.pdf' ? 'image' : 'empty', error: extension === '.pdf' ? '图片型 PDF，等待本地 OCR 支持' : '未从文件中提取到可用文本', hash, text: '' }
-  return { status: 'parsed', hash, format: extension.slice(1), text: trimmedText, textLength: trimmedText.length, parserVersion: PARSER_VERSION, knowledgeRole: knowledgeRoleOf(document), outline: buildFilteredOutline(trimmedText, document) }
+  const outline = buildFilteredOutline(trimmedText, document, segments)
+  const outlineLocations = outline.map((title) => ({ title, locations: locateConcept({ title, evidence: title }, segments, document.materialId) }))
+  return { status: 'parsed', hash, format: extension.slice(1), text: trimmedText, segments, textLength: trimmedText.length, parserVersion: PARSER_VERSION, knowledgeRole: knowledgeRoleOf(document), outline, outlineLocations }
 }
 
 async function extractLocalDocumentText(document) {
@@ -364,8 +503,140 @@ async function extractLocalDocumentText(document) {
 }
 
 function publicDocument(record) {
-  const { text, ...rest } = record
-  return rest
+  const { text, segments, aiVersionHistory, ...rest } = record
+  return { ...rest, segmentCount: Array.isArray(segments) ? segments.length : 0 }
+}
+
+function normalizedLocationText(value) {
+  return cleanLine(String(value ?? '')).toLocaleLowerCase().replace(/\s+/g, '')
+}
+
+function locationTokens(value) {
+  const source = cleanLine(String(value ?? '')).toLocaleLowerCase()
+  const tokens = new Set(source.match(/[a-z][a-z0-9-]{2,}/g) ?? [])
+  for (const sequence of source.match(/[\u3400-\u9fff]{2,}/g) ?? []) {
+    if (sequence.length <= 4) tokens.add(sequence)
+    for (let index = 0; index < sequence.length - 1; index += 1) tokens.add(sequence.slice(index, index + 2))
+  }
+  return tokens
+}
+
+function locateInSegments(concept, segments, materialId) {
+  if (!segments.length) return []
+  const evidence = normalizedLocationText(concept.evidence)
+  const title = normalizedLocationText(concept.title)
+  const queryTokens = locationTokens(`${concept.title ?? ''} ${concept.evidence ?? ''}`)
+  const scored = segments.map((segment) => {
+    const normalized = normalizedLocationText(segment.text)
+    let score = 0
+    if (evidence.length >= 4 && normalized.includes(evidence)) score = 0.99
+    else if (title.length >= 3 && normalized.includes(title)) score = 0.9
+    else if (queryTokens.size) {
+      const segmentTokens = locationTokens(segment.text)
+      const overlap = [...queryTokens].filter((token) => segmentTokens.has(token)).length
+      score = overlap / queryTokens.size * 0.82
+    }
+    return { segment, score }
+  }).filter((entry) => entry.score >= 0.34)
+  if (!scored.length) return []
+  const bestScore = Math.max(...scored.map((entry) => entry.score))
+  const candidates = scored.filter((entry) => entry.score >= Math.max(0.34, bestScore * 0.58)).sort((left, right) => left.segment.start - right.segment.start)
+  const clusters = []
+  for (const entry of candidates) {
+    const end = entry.segment.end ?? entry.segment.start
+    const current = clusters.at(-1)
+    if (current && current.kind === entry.segment.kind && entry.segment.start <= current.end + 2) {
+      current.end = Math.max(current.end, end)
+      current.score = Math.max(current.score, entry.score)
+      current.matches += 1
+    } else {
+      clusters.push({ kind: entry.segment.kind, start: entry.segment.start, end, score: entry.score, matches: 1 })
+    }
+  }
+  return clusters.sort((left, right) => right.score - left.score || right.matches - left.matches || left.start - right.start).slice(0, 3).sort((left, right) => left.start - right.start).map((cluster) => ({
+    materialId,
+    kind: cluster.kind,
+    start: cluster.start,
+    end: cluster.end,
+    confidence: Number(cluster.score.toFixed(2)),
+    evidence: String(concept.evidence ?? '').slice(0, 240),
+  }))
+}
+
+function locateConcept(concept, segments, materialId) {
+  if (!Array.isArray(segments) || !segments.length) return []
+  const hinted = []
+  for (const hint of Array.isArray(concept.locationHints) ? concept.locationHints : []) {
+    const start = Number(hint?.start)
+    const end = Number(hint?.end ?? start)
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) continue
+    const scope = segments.filter((segment) => segment.kind === hint.kind && segment.start >= start && (segment.end ?? segment.start) <= end)
+    hinted.push(...locateInSegments(concept, scope, materialId))
+  }
+  const uniqueHints = hinted.filter((location, index) => hinted.findIndex((other) => other.kind === location.kind && other.start === location.start && other.end === location.end) === index)
+  return uniqueHints.length ? uniqueHints : locateInSegments(concept, segments, materialId)
+}
+
+function attachConceptLocations(ai, segments, materialId) {
+  if (!ai || !Array.isArray(ai.concepts)) return ai
+  return { ...ai, concepts: ai.concepts.map((concept) => {
+    const { locationHints, ...stored } = concept
+    if (stored.locations?.length || stored.locationCandidates?.length) {
+      return {
+        ...stored,
+        locations: (stored.locations ?? []).map((location) => ({ ...location, materialId })),
+        locationCandidates: (stored.locationCandidates ?? []).map((location) => ({ ...location, materialId })),
+      }
+    }
+    if (ai.pageIndex) {
+      return {
+        ...stored,
+        locations: (stored.locations ?? []).map((location) => ({ ...location, materialId })),
+        locationCandidates: (stored.locationCandidates ?? []).map((location) => ({ ...location, materialId })),
+      }
+    }
+    return { ...stored, locations: locateConcept(concept, segments, materialId) }
+  }) }
+}
+
+function aiStateSnapshot(record) {
+  if (!record?.hash || (!record.ai && !record.aiProfiles)) return null
+  return {
+    hash: record.hash,
+    ai: record.ai,
+    aiProfiles: record.aiProfiles,
+    pageLocationOverrides: record.pageLocationOverrides,
+  }
+}
+
+function preserveAiState(previous, parsed, materialId) {
+  if (!previous || !['parsed', 'ocr'].includes(parsed.status)) return {}
+  const aiVersionHistory = { ...(previous.aiVersionHistory ?? {}) }
+  const snapshot = aiStateSnapshot(previous)
+  if (snapshot) aiVersionHistory[snapshot.hash] = snapshot
+  const source = previous.hash === parsed.hash ? previous : aiVersionHistory[parsed.hash]
+  if (!source) return Object.keys(aiVersionHistory).length ? { aiVersionHistory } : {}
+
+  const aiProfiles = {}
+  for (const mode of ['quick', 'deep', 'original']) {
+    const profile = source.aiProfiles?.[mode]
+    if (!profile || (profile.sourceHash && profile.sourceHash !== parsed.hash)) continue
+    aiProfiles[mode] = attachConceptLocations({ ...profile, mode, sourceHash: profile.sourceHash ?? parsed.hash }, parsed.segments, materialId)
+  }
+
+  const legacy = source.ai
+  if (legacy && (!legacy.sourceHash || legacy.sourceHash === parsed.hash)) {
+    const legacyMode = legacy.mode === 'original' ? 'original' : legacy.mode ?? (legacy.locationBatches ? 'deep' : 'quick')
+    if (!aiProfiles[legacyMode]) aiProfiles[legacyMode] = attachConceptLocations({ ...legacy, mode: legacyMode, sourceHash: legacy.sourceHash ?? parsed.hash }, parsed.segments, materialId)
+  }
+
+  const active = aiProfiles.original ?? aiProfiles.deep ?? aiProfiles.quick
+  return {
+    ...(active ? { ai: active } : {}),
+    ...(Object.keys(aiProfiles).length ? { aiProfiles } : {}),
+    ...(source.pageLocationOverrides ? { pageLocationOverrides: source.pageLocationOverrides } : {}),
+    ...(Object.keys(aiVersionHistory).length ? { aiVersionHistory } : {}),
+  }
 }
 
 function activeRecords(index, documents) {
@@ -374,7 +645,7 @@ function activeRecords(index, documents) {
     .filter((document) => !requested.size || requested.has(document.materialId))
     .map((record) => {
       const document = requested.get(record.materialId)
-      return document ? { ...record, title: document.title, courseId: document.courseId, courseName: document.courseName, localPath: document.localPath, knowledgeRole: knowledgeRoleOf(document) } : record
+      return document ? { ...record, title: document.title, courseId: document.courseId, courseName: document.courseName, localPath: document.localPath, sourceUrl: document.sourceUrl, knowledgeRole: knowledgeRoleOf(document) } : record
     })
 }
 
@@ -407,30 +678,33 @@ async function buildKnowledgeIndex({ root, documents, onProgress }) {
       const previous = index.documents[document.materialId]
       let record
       if (previous?.hash === hash && previous.localPath === document.localPath && ['parsed', 'ocr'].includes(previous.status) && previous.parserVersion === PARSER_VERSION) {
-        record = { ...previous, title: document.title, courseId: document.courseId, courseName: document.courseName, knowledgeRole: knowledgeRoleOf(document), reused: true }
+        record = { ...previous, title: document.title, courseId: document.courseId, courseName: document.courseName, sourceUrl: document.sourceUrl, knowledgeRole: knowledgeRoleOf(document), reused: true }
       } else {
         const parsed = await parseDocument(document)
-        const preservedAi = previous?.hash === parsed.hash && ['parsed', 'ocr'].includes(parsed.status) ? previous.ai : undefined
+        const preservedAiState = preserveAiState(previous, parsed, document.materialId)
         record = {
           materialId: document.materialId,
           courseId: document.courseId,
           courseName: document.courseName,
           title: document.title,
           localPath: document.localPath,
+          sourceUrl: document.sourceUrl,
           parsedAt: new Date().toISOString(),
           ...parsed,
-          ...(preservedAi ? { ai: preservedAi } : {}),
+          ...preservedAiState,
         }
       }
       index.documents[document.materialId] = record
+      if (!record.reused) invalidateCourseAliases(index, document.courseId)
       active.push(record)
     } catch (error) {
       const record = { materialId: document.materialId, courseId: document.courseId, courseName: document.courseName, title: document.title, localPath: document.localPath, status: 'failed', error: error instanceof Error ? error.message : String(error), parsedAt: new Date().toISOString() }
       index.documents[document.materialId] = record
+      invalidateCourseAliases(index, document.courseId)
       active.push(record)
     }
   }
-  index.concepts = buildStrictConcepts(active)
+  index.concepts = buildStrictConcepts(active, index.courseConceptAliases)
   await writeKnowledgeIndex(root, index)
   onProgress?.({ completed: list.length, total: list.length, title: '' })
   return resultFromRecords(active, index.concepts)
@@ -468,13 +742,16 @@ async function ocrKnowledgeDocument({ root, documents, materialId, cachePath, on
     parserVersion: PARSER_VERSION,
     knowledgeRole: knowledgeRoleOf(document),
     text: ocr.text,
+    segments: (ocr.segments ?? []).map((segment) => ({ kind: 'pdf-page', start: segment.page, end: segment.page, text: segment.text })),
     textLength: ocr.text.length,
-    outline: buildFilteredOutline(ocr.text, document),
+    outline: buildFilteredOutline(ocr.text, document, (ocr.segments ?? []).map((segment) => ({ kind: 'pdf-page', start: segment.page, end: segment.page, text: segment.text }))),
     ocr: { pages: ocr.pages, totalPages: ocr.totalPages, language: ocr.language, truncated: ocr.truncated, completedAt: new Date().toISOString() },
   }
+  record.outlineLocations = record.outline.map((title) => ({ title, locations: locateConcept({ title, evidence: title }, record.segments, document.materialId) }))
   index.documents[materialId] = record
+  invalidateCourseAliases(index, document.courseId)
   const active = activeRecords(index, documents)
-  index.concepts = buildStrictConcepts(active)
+  index.concepts = buildStrictConcepts(active, index.courseConceptAliases)
   await writeKnowledgeIndex(root, index)
   return resultFromRecords(active, index.concepts)
 }
@@ -511,42 +788,64 @@ async function refineKnowledgeDocument({ root, documents, materialId, refine, on
   const index = await readKnowledgeIndex(root)
   const previous = index.documents[materialId]
   if (!previous || !['parsed', 'ocr'].includes(previous.status) || !previous.text?.trim()) throw new Error('请先完成资料解析或 OCR，再进行 AI 精炼')
+  if (knowledgeRoleOf(document) === 'reference') throw new Error('教材和参考资料只进行本地解析与搜索，不参与 AI 知识点精炼')
   const sourceHash = previous.hash || await hashFile(document.localPath)
   if (!force && previous.ai?.sourceHash === sourceHash) throw new Error('该资料已经使用当前资料内容完成 AI 精炼；如需替换结果，请选择“重新 AI 精炼”')
-  onProgress?.({ completed: 0, total: 1, title: '正在校验本地解析结果…' })
-  onProgress?.({ completed: 0, total: 1, title: '正在整理已提取文本（不会上传原始文件）…' })
-  onProgress?.({ completed: 0, total: 1, title: '正在请求云端 AI 生成知识点…' })
+  onProgress?.({ completed: 0, total: 1, title: '正在校验本地资料与解析结果…' })
   const generated = await refine({
+    materialId: document.materialId,
     title: document.title,
     courseName: document.courseName,
+    localPath: document.localPath,
+    type: document.type,
+    hash: sourceHash,
     outline: previous.outline ?? [],
     text: previous.text,
-  })
+    segments: previous.segments ?? [],
+  }, (progress) => onProgress?.({ completed: progress.completed, total: progress.total, title: progress.title }))
   onProgress?.({ completed: 0, total: 1, title: '正在校验 AI 返回内容并更新课程知识点…' })
+  const locatedConcepts = attachConceptLocations({ concepts: generated.concepts }, previous.segments, document.materialId).concepts
+  const cards = buildPageCards(previous.segments ?? [])
+  const profile = {
+    summary: generated.summary,
+    concepts: locatedConcepts,
+    model: generated.model,
+    generatedAt: new Date().toISOString(),
+    sourceHash,
+    mode: generated.mode === 'original' ? 'original' : generated.mode === 'quick' ? 'quick' : 'deep',
+    locationBatches: generated.locationBatches ?? 0,
+    coverage: generated.coverage,
+    analysisMethod: generated.analysisMethod,
+    inputStrategy: generated.inputStrategy,
+    originalFile: generated.originalFile,
+    ...(generated.mode === 'original' ? { pageIndex: pageIndexStats(locatedConcepts, cards, generated.model) } : {}),
+  }
+  const aiProfiles = { ...(previous.aiProfiles ?? {}) }
+  const legacyMode = previous.ai?.mode === 'original' ? 'original' : previous.ai?.mode ?? (previous.ai?.locationBatches ? 'deep' : 'quick')
+  if (previous.ai && !aiProfiles[legacyMode]) aiProfiles[legacyMode] = previous.ai
+  aiProfiles[profile.mode] = profile
+  const activeProfile = profile.mode === 'original' ? profile : profile.mode === 'quick' && aiProfiles.deep?.sourceHash === sourceHash ? aiProfiles.deep : profile
   const record = {
     ...previous,
     title: document.title,
     courseId: document.courseId,
     courseName: document.courseName,
     localPath: document.localPath,
+    sourceUrl: document.sourceUrl,
     knowledgeRole: knowledgeRoleOf(document),
-    ai: {
-      summary: generated.summary,
-      concepts: generated.concepts,
-      model: generated.model,
-      generatedAt: new Date().toISOString(),
-      sourceHash,
-    },
+    ai: activeProfile,
+    aiProfiles,
   }
   index.documents[materialId] = record
+  invalidateCourseAliases(index, document.courseId)
   const active = activeRecords(index, documents)
-  index.concepts = buildStrictConcepts(active)
+  index.concepts = buildStrictConcepts(active, index.courseConceptAliases)
   await writeKnowledgeIndex(root, index)
   onProgress?.({ completed: 1, total: 1, title: '' })
   return resultFromRecords(active, index.concepts)
 }
 
-async function refineKnowledgeDocuments({ root, documents, materialIds, refine, onProgress }) {
+async function refineKnowledgeDocuments({ root, documents, materialIds, refine, onProgress, force = false }) {
   const ids = [...new Set((Array.isArray(materialIds) ? materialIds : []).filter((id) => typeof id === 'string'))]
   if (!ids.length) return knowledgeStatus(root, documents)
   let result = await knowledgeStatus(root, documents)
@@ -559,6 +858,7 @@ async function refineKnowledgeDocuments({ root, documents, materialIds, refine, 
         documents,
         materialId,
         refine,
+        force,
         onProgress: (progress) => {
           const fraction = progress.total > 0 ? progress.completed / progress.total : 0
           onProgress?.({ completed: Math.min(ids.length, position + fraction), total: ids.length, title: progress.title || '正在完成 AI 精炼…' })
@@ -570,6 +870,178 @@ async function refineKnowledgeDocuments({ root, documents, materialIds, refine, 
   }
   onProgress?.({ completed: ids.length, total: ids.length, title: '' })
   return { ...result, batch: { completed: ids.length - failed.length, failed } }
+}
+
+function currentAiProfile(record) {
+  const hash = record?.hash
+  if (record?.aiProfiles?.original && (!record.aiProfiles.original.sourceHash || record.aiProfiles.original.sourceHash === hash)) return { mode: 'original', profile: record.aiProfiles.original }
+  if (record?.aiProfiles?.deep && (!record.aiProfiles.deep.sourceHash || record.aiProfiles.deep.sourceHash === hash)) return { mode: 'deep', profile: record.aiProfiles.deep }
+  if (record?.ai && (!record.ai.sourceHash || record.ai.sourceHash === hash)) return { mode: record.ai.mode ?? (record.ai.locationBatches ? 'deep' : 'quick'), profile: record.ai }
+  if (record?.aiProfiles?.quick && (!record.aiProfiles.quick.sourceHash || record.aiProfiles.quick.sourceHash === hash)) return { mode: 'quick', profile: record.aiProfiles.quick }
+  return null
+}
+
+function pageIndexStats(concepts, cards, model = '') {
+  const source = Array.isArray(concepts) ? concepts : []
+  return {
+    version: PAGE_INDEX_VERSION,
+    generatedAt: new Date().toISOString(),
+    pages: cards.length,
+    concepts: source.length,
+    located: source.filter((concept) => concept.locations?.length).length,
+    candidates: source.filter((concept) => concept.locationCandidates?.length).length,
+    model,
+  }
+}
+
+async function reindexKnowledgeDocument({ root, documents, materialId, mapPages, onProgress }) {
+  const document = requestedDocument(documents, materialId)
+  if (!document) throw new Error('找不到需要补全页级索引的资料')
+  const index = await readKnowledgeIndex(root)
+  const record = index.documents[materialId]
+  const selected = currentAiProfile(record)
+  if (!record || !['parsed', 'ocr'].includes(record.status) || !Array.isArray(record.segments) || !record.segments.length) throw new Error('该资料没有可用于页级索引的页面文本')
+  if (!selected?.profile || !Array.isArray(selected.profile.concepts) || !selected.profile.concepts.length) throw new Error('请先完成 AI 精炼，再补全页级索引')
+
+  const cards = buildPageCards(record.segments)
+  const overrides = record.pageLocationOverrides ?? {}
+  onProgress?.({ completed: 0, total: 2, title: '正在本地匹配标题、关键词和数学公式…' })
+  let concepts = selected.profile.concepts.map((concept) => {
+    const local = localPageMapping(concept, cards, materialId)
+    const existingConfirmed = (concept.locations ?? []).filter((location) => Number(location.confidence ?? 0) >= 0.8 || location.manual)
+    const existingCandidates = [
+      ...(concept.locationCandidates ?? []),
+      ...(concept.locations ?? []).filter((location) => Number(location.confidence ?? 0) < 0.8 && !location.manual).map((location) => ({ ...location, candidate: true })),
+    ]
+    return { ...concept, locations: mergeLocations([...existingConfirmed, ...local.locations]), locationCandidates: mergeLocations([...existingCandidates, ...local.candidates]) }
+  })
+
+  let mapperModel = ''
+  let mapperError = ''
+  if (typeof mapPages === 'function') {
+    onProgress?.({ completed: 1, total: 2, title: '正在使用页面卡片补全跨语言章节范围…' })
+    try {
+      const mapped = await mapPages({
+        materialId,
+        title: document.title,
+        courseName: document.courseName,
+        concepts: concepts.map((concept) => ({ title: concept.title, evidence: concept.evidence })),
+        cards: cards.map(pageCardForCloud),
+      }, (progress) => onProgress?.({ completed: 1 + (progress.total ? progress.completed / progress.total : 0), total: 2, title: progress.title }))
+      mapperModel = String(mapped?.model ?? '')
+      const mappings = Array.isArray(mapped?.mappings) ? mapped.mappings : Array.isArray(mapped) ? mapped : []
+      concepts = concepts.map((concept, conceptIndex) => {
+        const cloud = cloudRangesForConcept(mappings.find((mapping) => Number(mapping.conceptIndex) === conceptIndex), cards, materialId)
+        return { ...concept, locations: mergeLocations([...(concept.locations ?? []), ...cloud.locations]), locationCandidates: mergeLocations([...(concept.locationCandidates ?? []), ...cloud.candidates]) }
+      })
+    } catch (error) {
+      mapperError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  concepts = concepts.map((concept) => applyLocationOverrides(concept, overrides[concept.title], materialId))
+  const profile = { ...selected.profile, concepts, pageIndex: { ...pageIndexStats(concepts, cards, mapperModel), ...(mapperError ? { cloudError: mapperError } : {}) } }
+  const aiProfiles = { ...(record.aiProfiles ?? {}), [selected.mode]: profile }
+  const updated = { ...record, ai: profile, aiProfiles }
+  index.documents[materialId] = updated
+  const active = activeRecords(index, documents)
+  index.concepts = buildStrictConcepts(active, index.courseConceptAliases)
+  await writeKnowledgeIndex(root, index)
+  onProgress?.({ completed: 2, total: 2, title: '' })
+  return resultFromRecords(active, index.concepts)
+}
+
+async function reindexKnowledgeDocuments({ root, documents, materialIds, mapPages, onProgress }) {
+  const ids = [...new Set((Array.isArray(materialIds) ? materialIds : []).filter((id) => typeof id === 'string'))]
+  let result = await knowledgeStatus(root, documents)
+  const failed = []
+  for (let position = 0; position < ids.length; position += 1) {
+    const materialId = ids[position]
+    try {
+      result = await reindexKnowledgeDocument({
+        root,
+        documents,
+        materialId,
+        mapPages,
+        onProgress: (progress) => onProgress?.({ completed: position + (progress.total ? progress.completed / progress.total : 0), total: ids.length, title: progress.title }),
+      })
+    } catch (error) {
+      failed.push({ materialId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  onProgress?.({ completed: ids.length, total: ids.length, title: '' })
+  return { ...result, batch: { completed: ids.length - failed.length, failed } }
+}
+
+async function updateKnowledgePageLocation({ root, documents, materialId, conceptTitle, action, location }) {
+  const document = requestedDocument(documents, materialId)
+  if (!document) throw new Error('找不到需要修改页码的资料')
+  const index = await readKnowledgeIndex(root)
+  const record = index.documents[materialId]
+  const selected = currentAiProfile(record)
+  if (!selected?.profile) throw new Error('该资料没有可修改的 AI 知识点')
+  const concept = selected.profile.concepts.find((item) => item.title === conceptTitle)
+  if (!concept) throw new Error('找不到需要修改的知识点')
+  const start = Number(location?.start)
+  const end = Number(location?.end ?? start)
+  const kind = typeof location?.kind === 'string' ? location.kind : record.segments?.[0]?.kind
+  const validPages = new Set((record.segments ?? []).filter((segment) => segment.kind === kind).map((segment) => Number(segment.start)))
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || !validPages.has(start) || !validPages.has(end)) throw new Error('页码或幻灯片范围超出资料边界')
+  const storedLocation = { materialId, kind, start, end, confidence: 1, method: 'manual', manual: true }
+  const overrides = { ...(record.pageLocationOverrides ?? {}) }
+  const current = { added: [...(overrides[conceptTitle]?.added ?? [])], removed: [...(overrides[conceptTitle]?.removed ?? [])] }
+  const signature = locationSignature(storedLocation)
+  if (action === 'add' || action === 'confirm') {
+    current.removed = current.removed.filter((item) => locationSignature(item) !== signature)
+    if (!current.added.some((item) => locationSignature(item) === signature)) current.added.push(storedLocation)
+  } else if (action === 'remove' || action === 'reject') {
+    current.added = current.added.filter((item) => locationSignature(item) !== signature)
+    if (!current.removed.some((item) => locationSignature(item) === signature)) current.removed.push({ kind, start, end })
+  } else throw new Error('不支持的页码修改操作')
+  overrides[conceptTitle] = current
+  const concepts = selected.profile.concepts.map((item) => applyLocationOverrides(item, overrides[item.title], materialId))
+  const cards = buildPageCards(record.segments)
+  const profile = { ...selected.profile, concepts, pageIndex: { ...pageIndexStats(concepts, cards, selected.profile.pageIndex?.model ?? ''), ...(selected.profile.pageIndex?.cloudError ? { cloudError: selected.profile.pageIndex.cloudError } : {}) } }
+  const aiProfiles = { ...(record.aiProfiles ?? {}), [selected.mode]: profile }
+  index.documents[materialId] = { ...record, ai: profile, aiProfiles, pageLocationOverrides: overrides }
+  const active = activeRecords(index, documents)
+  index.concepts = buildStrictConcepts(active, index.courseConceptAliases)
+  await writeKnowledgeIndex(root, index)
+  return resultFromRecords(active, index.concepts)
+}
+
+async function normalizeCourseKnowledgeConcepts({ root, documents, courseIds, normalize, onProgress }) {
+  if (typeof normalize !== 'function') throw new Error('缺少课程知识点归并器')
+  const index = await readKnowledgeIndex(root)
+  const active = activeRecords(index, documents)
+  const requestedCourseIds = new Set((Array.isArray(courseIds) ? courseIds : []).filter((courseId) => typeof courseId === 'string' && courseId))
+  const rawConcepts = buildStrictConcepts(active)
+  const documentMap = new Map(active.map((document) => [document.materialId, document]))
+  const courses = [...new Set(active.map((document) => document.courseId).filter((courseId) => courseId && (!requestedCourseIds.size || requestedCourseIds.has(courseId))))].map((courseId) => {
+    const courseDocuments = active.filter((document) => document.courseId === courseId)
+    return {
+      courseId,
+      courseName: courseDocuments.find((document) => document.courseName)?.courseName ?? courseId,
+      concepts: rawConcepts.filter((concept) => concept.courseIds.includes(courseId)).map((concept) => ({
+        title: concept.title,
+        sourceIds: concept.sourceIds,
+        locations: concept.locations,
+        summary: concept.sourceIds.map((sourceId) => documentMap.get(sourceId)?.ai?.summary).filter(Boolean).join('；').slice(0, 120),
+      })),
+    }
+  }).filter((course) => course.concepts.length > 1)
+
+  if (!courses.length) return resultFromRecords(active, buildStrictConcepts(active, index.courseConceptAliases))
+  const normalized = await normalize(courses, onProgress)
+  index.courseConceptAliases = { ...(index.courseConceptAliases ?? {}) }
+  for (const course of Array.isArray(normalized) ? normalized : []) {
+    if (!course?.courseId || (requestedCourseIds.size && !requestedCourseIds.has(course.courseId))) continue
+    const groups = (Array.isArray(course.groups) ? course.groups : []).filter((group) => Number(group?.confidence) >= 0.86 && Array.isArray(group.aliases) && group.aliases.length >= 2)
+    index.courseConceptAliases[course.courseId] = { model: course.model ?? '', generatedAt: new Date().toISOString(), groups }
+  }
+  index.concepts = buildStrictConcepts(active, index.courseConceptAliases)
+  await writeKnowledgeIndex(root, index)
+  return resultFromRecords(active, index.concepts)
 }
 
 async function refreshRelocatedDocumentRecords(root, index, documents) {
@@ -590,6 +1062,7 @@ async function refreshRelocatedDocumentRecords(root, index, documents) {
 
     try {
       const parsed = await parseDocument(document)
+      const preservedAiState = preserveAiState(previous, parsed, document.materialId)
       index.documents[document.materialId] = {
         materialId: document.materialId,
         courseId: document.courseId,
@@ -598,7 +1071,10 @@ async function refreshRelocatedDocumentRecords(root, index, documents) {
         localPath: document.localPath,
         parsedAt: new Date().toISOString(),
         ...parsed,
+        knowledgeRole: knowledgeRoleOf(document),
+        ...preservedAiState,
       }
+      invalidateCourseAliases(index, document.courseId)
     } catch (error) {
       index.documents[document.materialId] = {
         materialId: document.materialId,
@@ -610,12 +1086,13 @@ async function refreshRelocatedDocumentRecords(root, index, documents) {
         error: error instanceof Error ? error.message : String(error),
         parsedAt: new Date().toISOString(),
       }
+      invalidateCourseAliases(index, document.courseId)
     }
     changed = true
   }
 
   if (changed) {
-    index.concepts = buildStrictConcepts(Object.values(index.documents))
+    index.concepts = buildStrictConcepts(Object.values(index.documents), index.courseConceptAliases)
     await writeKnowledgeIndex(root, index)
   }
   return changed
@@ -625,7 +1102,7 @@ async function knowledgeStatus(root, documents) {
   const index = await readKnowledgeIndex(root)
   await refreshRelocatedDocumentRecords(root, index, documents)
   const active = activeRecords(index, documents)
-  const concepts = buildStrictConcepts(active)
+  const concepts = buildStrictConcepts(active, index.courseConceptAliases)
   return resultFromRecords(active, concepts)
 }
 
@@ -675,4 +1152,4 @@ async function searchKnowledgeDocuments({ root, documents, query, limit = 20 }) 
   return results.sort((left, right) => right.score - left.score || left.title.localeCompare(right.title, 'zh-CN')).slice(0, Math.max(1, Math.min(50, Number(limit) || 20)))
 }
 
-module.exports = { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, ocrKnowledgeDocument, ocrKnowledgeDocuments, refineKnowledgeDocument, refineKnowledgeDocuments, readKnowledgeDocumentContent, searchKnowledgeDocuments, toConceptTitle }
+module.exports = { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, normalizeCourseKnowledgeConcepts, ocrKnowledgeDocument, ocrKnowledgeDocuments, refineKnowledgeDocument, refineKnowledgeDocuments, reindexKnowledgeDocument, reindexKnowledgeDocuments, readKnowledgeDocumentContent, searchKnowledgeDocuments, toConceptTitle, updateKnowledgePageLocation }

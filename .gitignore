@@ -24,3 +24,10 @@ tmp/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Competition submission QA and temporary media
+submission/competition-2026/qa/
+submission/competition-2026/media/audio/
+submission/competition-2026/media/xuejing-demo-*
+submission/competition-2026/media/xuejing-demo.*
+submission/competition-2026/media/screenshots/contact-sheet.jpg

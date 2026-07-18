@@ -60,13 +60,65 @@ type KnowledgeBuildDocument = {
   title: string
   localPath: string
   type: string
+  sourceUrl?: string
   knowledgeRole?: 'courseware' | 'reference'
 }
 
+type MaterialVersionCatalog = {
+  groups: {
+    materialId: string
+    courseId: string
+    baseTitle: string
+    displayTitle: string
+    relation: 'single' | 'versions' | 'source-conflict'
+    activePath: string
+    recommendedPath: string
+    versions: { id: string; localPath: string; hash: string; importedAt: string; bytes: number; pages: number; descriptor: string; current: boolean }[]
+  }[]
+  duplicates: { hash: string; keepPath: string; duplicatePaths: string[]; safeCleanupPaths: string[] }[]
+}
+
+type KnowledgeLocation = { materialId: string; kind: 'pdf-page' | 'pptx-slide' | 'docx-section'; start: number; end?: number; confidence?: number; evidence?: string; method?: string; candidate?: boolean; manual?: boolean }
+
+type KnowledgePageIndex = {
+  version: number
+  generatedAt: string
+  pages: number
+  concepts: number
+  located: number
+  candidates: number
+  model?: string
+  cloudError?: string
+}
+
 type KnowledgeIndexResult = {
-  documents: { materialId: string; courseId: string; courseName: string; title: string; localPath: string; status: 'parsed' | 'ocr' | 'failed' | 'unsupported' | 'skipped' | 'empty' | 'image'; hash?: string; error?: string; outline?: string[]; textLength?: number; parsedAt?: string; knowledgeRole?: 'courseware' | 'reference'; ocr?: { pages: number; totalPages: number; language: string; truncated: boolean }; ai?: { summary: string; concepts: { title: string; evidence: string }[]; model: string; generatedAt: string; sourceHash?: string } }[]
-  concepts: { id: string; title: string; sourceIds: string[]; courseIds: string[] }[]
+  documents: { materialId: string; courseId: string; courseName: string; title: string; localPath: string; status: 'parsed' | 'ocr' | 'failed' | 'unsupported' | 'skipped' | 'empty' | 'image'; hash?: string; error?: string; outline?: string[]; outlineLocations?: { title: string; locations: KnowledgeLocation[] }[]; textLength?: number; segmentCount?: number; parsedAt?: string; knowledgeRole?: 'courseware' | 'reference'; ocr?: { pages: number; totalPages: number; language: string; truncated: boolean }; ai?: KnowledgeAiProfile; aiProfiles?: { quick?: KnowledgeAiProfile; deep?: KnowledgeAiProfile; original?: KnowledgeAiProfile } }[]
+  concepts: { id: string; title: string; aliases?: string[]; sourceIds: string[]; courseIds: string[]; locations?: KnowledgeLocation[] }[]
   stats: { total: number; parsed: number; ocr: number; image: number; failed: number; unsupported: number; reference: number; concepts: number }
+}
+
+type KnowledgeAiProfile = { summary: string; concepts: { title: string; evidence: string; aliases?: string[]; locations?: KnowledgeLocation[]; locationCandidates?: KnowledgeLocation[] }[]; model: string; generatedAt: string; sourceHash?: string; mode?: 'quick' | 'deep' | 'original'; analysisMethod?: 'original-file' | 'structured-pages'; inputStrategy?: 'local-structured-pages'; originalFile?: { filename: string; bytes: number; uploadedAt: string }; locationBatches?: number; coverage?: { covered: number; total: number; percent: number; omittedRanges?: { kind: string; start: number; end: number }[] }; pageIndex?: KnowledgePageIndex }
+
+type AiCapabilities = { provider: 'openai' | 'deepseek' | 'gemini' | 'custom'; chat: boolean; files: boolean; responses: boolean; refinementMode: 'original-file' | 'structured-pages'; detectedAt: string; latencyMs: number }
+type AiSettings = { configured: boolean; provider: AiCapabilities['provider']; baseUrl: string; model: string; capabilities?: AiCapabilities }
+
+export type RefinementJob = {
+  id: string
+  courseId: string
+  mode: 'quick' | 'deep' | 'original'
+  force: boolean
+  status: 'running' | 'pausing' | 'paused' | 'cancelling' | 'interrupted' | 'completed' | 'completed_with_errors' | 'failed'
+  materialIds: string[]
+  items: { materialId: string; title: string; completed: boolean; failed?: string; checkpointed: boolean }[]
+  completedIds: string[]
+  failed: { materialId: string; error: string }[]
+  checkpointedIds: string[]
+  currentMaterialId: string | null
+  progress: { completed: number; total: number; title: string; itemCompleted?: number; itemTotal?: number }
+  createdAt: string
+  updatedAt: string
+  finalizedAt: string | null
+  finalizationError: string | null
 }
 
 declare global {
@@ -108,6 +160,8 @@ declare global {
         verifyFiles: (payload: { paths: string[] }) => Promise<{ path: string; exists: boolean; bytes: number }[]>
         matchBlackboardFiles: (payload: { urls: string[] }) => Promise<{ url: string; localPath: string; title: string; type: 'PPT' | 'PDF' | '视频' | '文件' }[]>
         repairExtensions: () => Promise<{ repaired: number; repairedFiles: { from: string; to: string }[]; vaultRoot: string }>
+        materialVersions: (payload: { documents: KnowledgeBuildDocument[] }) => Promise<MaterialVersionCatalog>
+        cleanupDuplicates: (payload: { documents: KnowledgeBuildDocument[]; paths: string[] }) => Promise<{ removed: string[]; rejected: string[] }>
         importFiles: (payload: { courseName: string; folderPath: string[] }) => Promise<{
           cancelled: boolean
           vaultRoot?: string
@@ -121,23 +175,35 @@ declare global {
         ocr: (payload: { documents: KnowledgeBuildDocument[]; materialId: string }) => Promise<KnowledgeIndexResult>
         ocrBatch: (payload: { documents: KnowledgeBuildDocument[]; materialIds: string[] }) => Promise<KnowledgeIndexResult & { batch: { completed: number; failed: { materialId: string; error: string }[] } }>
         refine: (payload: { documents: KnowledgeBuildDocument[]; materialId: string; force?: boolean }) => Promise<KnowledgeIndexResult>
-        refineBatch: (payload: { documents: KnowledgeBuildDocument[]; materialIds: string[] }) => Promise<KnowledgeIndexResult & { batch: { completed: number; failed: { materialId: string; error: string }[] } }>
+        refineBatch: (payload: { documents: KnowledgeBuildDocument[]; materialIds: string[]; force?: boolean }) => Promise<KnowledgeIndexResult & { batch: { completed: number; failed: { materialId: string; error: string }[] } }>
+        reindexPages: (payload: { documents: KnowledgeBuildDocument[]; materialId: string; useCloud?: boolean }) => Promise<KnowledgeIndexResult>
+        reindexPagesBatch: (payload: { documents: KnowledgeBuildDocument[]; materialIds: string[]; useCloud?: boolean }) => Promise<KnowledgeIndexResult & { batch: { completed: number; failed: { materialId: string; error: string }[] } }>
+        updatePageLocation: (payload: { documents: KnowledgeBuildDocument[]; materialId: string; conceptTitle: string; action: 'add' | 'remove' | 'confirm' | 'reject'; location: Pick<KnowledgeLocation, 'kind' | 'start' | 'end'> }) => Promise<KnowledgeIndexResult>
+        refinementJobs: () => Promise<RefinementJob[]>
+        startRefinementJob: (payload: { documents: KnowledgeBuildDocument[]; materialIds: string[]; courseId: string; mode?: 'original'; force?: boolean }) => Promise<RefinementJob>
+        pauseRefinementJob: (jobId: string) => Promise<RefinementJob>
+        cancelRefinementJob: (jobId: string) => Promise<RefinementJob>
+        resumeRefinementJob: (payload: { jobId: string; restart?: boolean }) => Promise<RefinementJob>
+        dismissRefinementJob: (jobId: string) => Promise<{ removed: boolean }>
         documentContent: (payload: { documents: KnowledgeBuildDocument[]; materialId: string }) => Promise<{ materialId: string; title: string; courseName: string; format: string; text: string; textLength: number }>
         search: (payload: { documents: KnowledgeBuildDocument[]; query: string; limit?: number }) => Promise<{ materialId: string; title: string; courseId: string; courseName: string; snippet: string; score: number }[]>
         documentFile: (payload: { documents: KnowledgeBuildDocument[]; materialId: string }) => Promise<{ materialId: string; title: string; format: 'pdf' | 'docx' | 'pptx' | 'ppt' | 'unknown'; bytes: Uint8Array }>
         onProgress: (listener: (progress: { completed: number; total: number; title: string }) => void) => () => void
+        onRefinementJobChange: (listener: (job: RefinementJob) => void) => () => void
       }
       ai: {
-        settings: () => Promise<{ configured: boolean; baseUrl: string; model: string }>
-        saveSettings: (payload: { baseUrl: string; model: string; apiKey?: string }) => Promise<{ configured: boolean; baseUrl: string; model: string }>
-        testConnection: (payload: { baseUrl: string; model: string; apiKey?: string }) => Promise<{ model: string; latencyMs: number }>
+        settings: () => Promise<AiSettings>
+        presets: () => Promise<{ id: AiCapabilities['provider']; label: string; baseUrl: string; description: string }[]>
+        saveSettings: (payload: { provider: AiCapabilities['provider']; baseUrl: string; model: string; apiKey?: string; capabilities?: AiCapabilities }) => Promise<AiSettings>
+        testConnection: (payload: { provider: AiCapabilities['provider']; baseUrl: string; model: string; apiKey?: string }) => Promise<{ model: string; latencyMs: number; capabilities: AiCapabilities }>
+        listModels: (payload: { provider: AiCapabilities['provider']; baseUrl: string; model?: string; apiKey?: string }) => Promise<{ provider: AiCapabilities['provider']; models: string[]; source: string }>
         chat: (payload: { context: string; messages: { role: 'user' | 'assistant'; content: string }[] }) => Promise<{ content: string; model: string }>
       }
       email: {
-        settings: () => Promise<{ configured: boolean; enabled: boolean; host: string; port: number; secure: boolean; username: string; from: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean }>
-        saveSettings: (payload: { enabled: boolean; host: string; port: number; secure: boolean; username: string; from?: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean; password?: string }) => Promise<{ configured: boolean; enabled: boolean; host: string; port: number; secure: boolean; username: string; from: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean }>
+        settings: () => Promise<{ configured: boolean; enabled: boolean; host: string; port: number; secure: boolean; username: string; from: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean; syncEmailMode: 'important' | 'daily' | 'every_sync' | 'off'; syncDigestHour: number }>
+        saveSettings: (payload: { enabled: boolean; host: string; port: number; secure: boolean; username: string; from?: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean; syncEmailMode: 'important' | 'daily' | 'every_sync' | 'off'; syncDigestHour: number; password?: string }) => Promise<{ configured: boolean; enabled: boolean; host: string; port: number; secure: boolean; username: string; from: string; recipient: string; notifyCourseUpdates: boolean; notifyDeadlines: boolean; syncEmailMode: 'important' | 'daily' | 'every_sync' | 'off'; syncDigestHour: number }>
         test: (payload: { host: string; port: number; secure: boolean; username: string; from?: string; recipient: string; password?: string }) => Promise<{ sent: boolean; messageId: string; latencyMs: number }>
-        sendSyncUpdate: (payload: { events: { title: string; detail: string; source: string }[] }) => Promise<{ sent: boolean; skipped?: boolean; messageId?: string }>
+        sendSyncUpdate: (payload: { events: { title: string; detail: string; source: string; kind?: string; courseId?: string }[] }) => Promise<{ sent: boolean; skipped?: boolean; messageId?: string }>
         sendDeadline: (payload: { course: string; title: string; deadline: string; label: string }) => Promise<{ sent: boolean; skipped?: boolean; messageId?: string }>
         sendDeadlineDigest: (payload: { items: { course: string; title: string; deadline: string; label: string }[] }) => Promise<{ sent: boolean; skipped?: boolean; messageId?: string }>
       }

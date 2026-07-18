@@ -38,4 +38,10 @@ describe('layered knowledge map', () => {
     }
     expect(prioritizeMapConcepts(concepts, {}, evidence).map((concept) => concept.id)).toEqual(['conflict', 'test-weak', 'verified'])
   })
+
+  it('carries a page-level concept context onto its source document node', () => {
+    const concepts: MapConcept[] = [{ id: 'k1', title: '卷积', sourceIds: ['m1'], courseIds: ['c1'], locations: [{ materialId: 'm1', kind: 'pdf-page', start: 12, end: 14, confidence: .96 }] }]
+    const data = buildKnowledgeMap([documents[0]], concepts, 'k1')
+    expect(data.nodes.find((node) => node.kind === 'document')).toMatchObject({ documentId: 'm1', sourceConceptId: 'k1', subtitle: '定位：第 12–14 页' })
+  })
 })

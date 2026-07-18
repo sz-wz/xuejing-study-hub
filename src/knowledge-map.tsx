@@ -9,10 +9,12 @@ export type MapDocument = {
   title: string
   status: string
   outline?: string[]
-  ai?: { concepts: { title: string; evidence: string }[]; sourceHash?: string }
+  outlineLocations?: { title: string; locations: MapLocation[] }[]
+  ai?: { concepts: { title: string; evidence: string; locations?: MapLocation[] }[]; sourceHash?: string; locationBatches?: number }
 }
 
-export type MapConcept = { id: string; title: string; sourceIds: string[]; courseIds: string[] }
+export type MapLocation = { materialId: string; kind: 'pdf-page' | 'pptx-slide' | 'docx-section'; start: number; end?: number; confidence?: number; evidence?: string }
+export type MapConcept = { id: string; title: string; sourceIds: string[]; courseIds: string[]; locations?: MapLocation[] }
 type Rating = 0 | 1 | 2 | 3 | 4
 type NodeKind = 'course' | 'document' | 'documentConcept' | 'courseConcept'
 
@@ -27,6 +29,7 @@ type MapNode = {
   courseId?: string
   documentId?: string
   conceptId?: string
+  sourceConceptId?: string
 }
 
 type MapEdge = { from: string; to: string; kind: 'contains' | 'maps' }
@@ -36,6 +39,11 @@ const palette = ['#4b7d66', '#55799f', '#9a6c49', '#7a689b', '#4d8990', '#aa627a
 
 function normalized(value: string) {
   return value.replace(/\s+/g, ' ').trim().toLocaleLowerCase()
+}
+
+function mapLocationLabel(location: MapLocation) {
+  const range = location.end && location.end !== location.start ? `${location.start}–${location.end}` : String(location.start)
+  return location.kind === 'pptx-slide' ? `幻灯片 ${range}` : location.kind === 'pdf-page' ? `第 ${range} 页` : `章节 ${range}`
 }
 
 function documentConcepts(document: MapDocument) {
@@ -125,7 +133,8 @@ export function buildKnowledgeMap(documents: MapDocument[], concepts: MapConcept
         const x = 480 + Math.cos(angle) * radius
         const y = 340 + Math.sin(angle) * radius
         const documentId = `document:${document.materialId}`
-        nodes.push({ id: documentId, kind: 'document', title: document.title, subtitle: '该主题的来源资料', x, y, radius: 17, courseId: document.courseId, documentId: document.materialId })
+        const locations = concept.locations?.filter((location) => location.materialId === document.materialId) ?? []
+        nodes.push({ id: documentId, kind: 'document', title: document.title, subtitle: locations.length ? `定位：${locations.map(mapLocationLabel).join('、')}` : '该主题的来源资料 · 尚未定位具体页', x, y, radius: 17, courseId: document.courseId, documentId: document.materialId, sourceConceptId: concept.id })
         edges.push({ from: centerId, to: documentId, kind: 'maps' })
         const themes = documentConcepts(document).filter((title) => normalized(title) !== normalized(concept.title)).slice(0, 3)
         themes.forEach((title, themeIndex) => {
@@ -315,7 +324,7 @@ function MapCanvas({ data, ratings, evidence, selectedId, onSelect }: CanvasProp
   </div>
 }
 
-export function KnowledgeMap({ documents, concepts, ratings, evidence, courseFilter, onCourseFilterChange, onOpenDocument, onReviewConcept }: { documents: MapDocument[]; concepts: MapConcept[]; ratings: Record<string, Rating>; evidence: Record<string, ConceptEvidence>; courseFilter: string; onCourseFilterChange: (value: string) => void; onOpenDocument: (documentId: string, courseId: string) => void; onReviewConcept: (conceptId: string, courseId: string) => void }) {
+export function KnowledgeMap({ documents, concepts, ratings, evidence, courseFilter, onCourseFilterChange, onOpenDocument, onReviewConcept }: { documents: MapDocument[]; concepts: MapConcept[]; ratings: Record<string, Rating>; evidence: Record<string, ConceptEvidence>; courseFilter: string; onCourseFilterChange: (value: string) => void; onOpenDocument: (documentId: string, courseId: string, conceptId?: string) => void; onReviewConcept: (conceptId: string, courseId: string) => void }) {
   const courseOptions = useMemo(() => [...new Map(documents.map((document) => [document.courseId, document.courseName])).entries()].sort((left, right) => left[1].localeCompare(right[1], 'zh-CN')), [documents])
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -329,12 +338,16 @@ export function KnowledgeMap({ documents, concepts, ratings, evidence, courseFil
   const visibleConcepts = courseFilter === 'all' || focusConceptId ? filteredConcepts : prioritizedConcepts.slice(conceptPage * pageSize, (conceptPage + 1) * pageSize)
   const data = useMemo(() => buildKnowledgeMap(filteredDocuments, visibleConcepts, focusConceptId, courseFilter === 'all'), [courseFilter, filteredDocuments, focusConceptId, visibleConcepts])
   const selected = selectedId ? data.nodeById.get(selectedId) : undefined
+  const selectedConcept = selected?.conceptId ? concepts.find((concept) => concept.id === selected.conceptId) : undefined
   const matches = useMemo(() => {
     const text = normalized(query)
     if (!text) return []
     return filteredConcepts.filter((concept) => normalized(concept.title).includes(text)).slice(0, 8).map((concept) => ({ id: `course-concept:${concept.id}`, title: concept.title, kind: 'courseConcept' as const, conceptId: concept.id }))
   }, [filteredConcepts, query])
 
+  useEffect(() => {
+    if (courseFilter !== 'all' && !courseOptions.some(([id]) => id === courseFilter)) onCourseFilterChange('all')
+  }, [courseFilter, courseOptions, onCourseFilterChange])
   useEffect(() => { setSelectedId(null); setFocusConceptId(null); setQuery(''); setConceptPage(0) }, [courseFilter])
   const selectNode = (id: string) => {
     const node = data.nodeById.get(id)
@@ -351,5 +364,5 @@ export function KnowledgeMap({ documents, concepts, ratings, evidence, courseFil
   }
 
   const selectedEvidence = selected?.conceptId ? evidence[selected.conceptId] : undefined
-  return <div className="knowledge-map-layout"><div className="knowledge-map-toolbar"><label>范围<select value={courseFilter} onChange={(event) => onCourseFilterChange(event.target.value)}><option value="all">全部课程地图</option>{courseOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label><label className="knowledge-map-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索课程知识点" />{matches.length ? <div>{matches.map((node) => <button key={node.id} onClick={() => { setFocusConceptId(node.conceptId); setSelectedId(node.id); setQuery('') }}>{node.title}<small>展开资料级来源</small></button>)}</div> : null}</label>{focusConceptId ? <button className="outline-button" onClick={() => { setFocusConceptId(null); setSelectedId(null) }}>返回主题列表</button> : courseFilter !== 'all' ? <><button className="outline-button" onClick={() => onCourseFilterChange('all')}>返回全部课程</button>{pageCount > 1 ? <div className="knowledge-map-pages"><button disabled={conceptPage === 0} onClick={() => setConceptPage((page) => Math.max(0, page - 1))}>上一批</button><span>{conceptPage + 1}/{pageCount} · 每批最多 {pageSize} 个</span><button disabled={conceptPage >= pageCount - 1} onClick={() => setConceptPage((page) => Math.min(pageCount - 1, page + 1))}>下一批</button></div> : null}</> : <span>先选择课程，再逐层查看主题与来源</span>}<span>{data.nodes.length} 个可见节点 · {data.edges.length} 条关系</span></div><div className="knowledge-evidence-legend"><span className="unassessed">未形成证据</span><span className="self_weak">自评薄弱</span><span className="test_weak">测试薄弱</span><span className="conflict">自评与测试不一致</span><span className="verified">测试验证较好</span><small>有描边的知识点已经被快速测试覆盖</small></div><div className="knowledge-map-workspace"><MapCanvas data={data} ratings={ratings} evidence={evidence} selectedId={selectedId} onSelect={selectNode} /><aside className="knowledge-map-inspector"><span className="eyebrow">节点详情</span>{selected ? <><i className={'map-kind ' + selected.kind}>{selected.kind === 'course' ? '课程' : selected.kind === 'document' ? '来源资料' : selected.kind === 'documentConcept' ? '资料级主题' : '课程主题'}</i><h2>{selected.title}</h2><p>{selected.subtitle}</p>{selected.conceptId ? <div className="map-concept-evidence"><span className={`concept-evidence-status ${selectedEvidence?.status ?? 'unassessed'}`}>{conceptEvidenceLabels[selectedEvidence?.status ?? 'unassessed']}</span><p>主动自评：{['未评估', '陌生', '模糊', '理解', '掌握'][ratings[selected.conceptId] ?? 0]}</p><p>最近测试：{selectedEvidence?.latestTestScore === null || selectedEvidence?.latestTestScore === undefined ? '尚未覆盖' : `${selectedEvidence.latestTestScore}%（${selectedEvidence.latestTestCorrect}/${selectedEvidence.latestTestQuestions}）`}</p><p>最近复习：{selectedEvidence?.lastReviewedAt ? new Date(selectedEvidence.lastReviewedAt).toLocaleDateString() : '尚无记录'}</p>{selected.courseId ? <button className="outline-button" onClick={() => onReviewConcept(selected.conceptId!, courseFilter !== 'all' ? courseFilter : selected.courseId!)}>加入自选复习</button> : null}</div> : null}{selected.documentId && selected.courseId ? <button className="primary-button map-open-document" onClick={() => onOpenDocument(selected.documentId!, selected.courseId!)}>在学径中打开这份资料</button> : null}</> : <p>{focusConceptId ? '当前只显示一个主题及其来源资料。点击资料可以在学径中打开原文件。' : courseFilter === 'all' ? '全课程地图只显示课程入口，避免把上千个节点堆在一起。点击课程进入它的主题地图。' : `当前课程共 ${filteredConcepts.length} 个主题，每批最多显示 ${pageSize} 个。薄弱、矛盾和来源较多的主题优先。`}</p>}</aside></div></div>
+  return <div className="knowledge-map-layout"><div className="knowledge-map-toolbar"><label>范围<select value={courseFilter} onChange={(event) => onCourseFilterChange(event.target.value)}><option value="all">全部课程地图</option>{courseOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label><label className="knowledge-map-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索课程知识点" />{matches.length ? <div>{matches.map((node) => <button key={node.id} onClick={() => { setFocusConceptId(node.conceptId); setSelectedId(node.id); setQuery('') }}>{node.title}<small>展开资料级来源</small></button>)}</div> : null}</label>{focusConceptId ? <button className="outline-button" onClick={() => { setFocusConceptId(null); setSelectedId(null) }}>返回主题列表</button> : courseFilter !== 'all' ? <><button className="outline-button" onClick={() => onCourseFilterChange('all')}>返回全部课程</button>{pageCount > 1 ? <div className="knowledge-map-pages"><button disabled={conceptPage === 0} onClick={() => setConceptPage((page) => Math.max(0, page - 1))}>上一批</button><span>{conceptPage + 1}/{pageCount} · 每批最多 {pageSize} 个</span><button disabled={conceptPage >= pageCount - 1} onClick={() => setConceptPage((page) => Math.min(pageCount - 1, page + 1))}>下一批</button></div> : null}</> : <span>先选择课程，再逐层查看主题与来源</span>}<span>{data.nodes.length} 个可见节点 · {data.edges.length} 条关系</span></div><div className="knowledge-evidence-legend"><span className="unassessed">未形成证据</span><span className="self_weak">自评薄弱</span><span className="test_weak">测试薄弱</span><span className="conflict">自评与测试不一致</span><span className="verified">测试验证较好</span><small>有描边的知识点已经被快速测试覆盖</small></div><div className="knowledge-map-workspace"><MapCanvas data={data} ratings={ratings} evidence={evidence} selectedId={selectedId} onSelect={selectNode} /><aside className="knowledge-map-inspector"><span className="eyebrow">节点详情</span>{selected ? <><i className={'map-kind ' + selected.kind}>{selected.kind === 'course' ? '课程' : selected.kind === 'document' ? '来源资料' : selected.kind === 'documentConcept' ? '资料级主题' : '课程主题'}</i><h2>{selected.title}</h2><p>{selected.subtitle}</p>{selected.conceptId ? <div className="map-concept-evidence"><span className={`concept-evidence-status ${selectedEvidence?.status ?? 'unassessed'}`}>{conceptEvidenceLabels[selectedEvidence?.status ?? 'unassessed']}</span><p>主动自评：{['未评估', '陌生', '模糊', '理解', '掌握'][ratings[selected.conceptId] ?? 0]}</p><p>最近测试：{selectedEvidence?.latestTestScore === null || selectedEvidence?.latestTestScore === undefined ? '尚未覆盖' : `${selectedEvidence.latestTestScore}%（${selectedEvidence.latestTestCorrect}/${selectedEvidence.latestTestQuestions}）`}</p><p>最近复习：{selectedEvidence?.lastReviewedAt ? new Date(selectedEvidence.lastReviewedAt).toLocaleDateString() : '尚无记录'}</p>{selected.courseId ? <button className="outline-button" onClick={() => onReviewConcept(selected.conceptId!, courseFilter !== 'all' ? courseFilter : selected.courseId!)}>{selectedConcept?.locations?.length ? '从定位页开始复习' : '加入自选复习'}</button> : null}{selectedConcept?.locations?.length ? <div className="map-page-locations"><strong>页级来源</strong>{selectedConcept.locations.slice(0, 8).map((location, index) => { const source = documents.find((document) => document.materialId === location.materialId); return <button key={`${location.materialId}:${location.kind}:${location.start}:${index}`} onClick={() => onOpenDocument(location.materialId, source?.courseId ?? selected.courseId!, selected.conceptId!)}><span>{source?.title ?? '来源资料'}</span><small>{mapLocationLabel(location)} · 置信度 {Math.round((location.confidence ?? 0) * 100)}%</small></button> })}</div> : null}</div> : null}{selected.documentId && selected.courseId ? <button className="primary-button map-open-document" onClick={() => onOpenDocument(selected.documentId!, selected.courseId!, selected.sourceConceptId)}>在学径中打开{selected.sourceConceptId ? '定位页' : '这份资料'}</button> : null}</> : <p>{focusConceptId ? '当前只显示一个主题及其来源资料。点击资料可以在学径中打开原文件。' : courseFilter === 'all' ? '全课程地图只显示课程入口，避免把上千个节点堆在一起。点击课程进入它的主题地图。' : `当前课程共 ${filteredConcepts.length} 个主题，每批最多显示 ${pageSize} 个。薄弱、矛盾和来源较多的主题优先。`}</p>}</aside></div></div>
 }

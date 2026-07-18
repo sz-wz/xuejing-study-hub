@@ -6,8 +6,15 @@ test('email settings are opt-in and expose no encrypted password', () => {
   const settings = normalizeEmailSettings({ host: 'smtp.example.com', port: 587, secure: false, username: 'student@example.com', recipient: 'notify@example.com', encryptedPassword: 'secret' })
   assert.equal(settings.enabled, false)
   assert.equal(settings.port, 587)
+  assert.equal(settings.syncEmailMode, 'important')
   assert.equal(publicEmailSettings(settings).configured, true)
   assert.equal(Object.hasOwn(publicEmailSettings(settings), 'encryptedPassword'), false)
+})
+
+test('sync digest keeps aggregated changes without the old 100 item silent truncation', () => {
+  const message = buildSyncUpdateMessage(Array.from({ length: 140 }, (_, index) => ({ title: `课程 ${index}`, detail: `更新 ${index}`, source: 'Blackboard' })))
+  assert.equal(message.count, 140)
+  assert.match(message.text, /课程 139/)
 })
 
 test('invalid recipient and incomplete SMTP settings are rejected', () => {

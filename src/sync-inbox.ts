@@ -1,6 +1,6 @@
 import type { Assignment, Course, Material, Source } from './types'
 
-export type SyncInboxKind = 'course_added' | 'material_added' | 'assignment_added' | 'deadline_changed' | 'assignment_status_changed' | 'score_changed' | 'connection_required' | 'email_sent' | 'email_failed'
+export type SyncInboxKind = 'sync_summary' | 'course_added' | 'material_added' | 'material_batch_added' | 'assignment_added' | 'deadline_changed' | 'assignment_status_changed' | 'score_changed' | 'connection_required' | 'email_sent' | 'email_failed'
 export type SyncInboxSource = Extract<Source, 'Blackboard' | 'Gradescope'> | 'Email'
 
 export type SyncInboxItem = {
@@ -43,6 +43,15 @@ const statusLabels: Record<Assignment['status'], string> = {
 }
 
 export function detectSyncChanges(before: Snapshot, after: Snapshot, source: Extract<SyncInboxSource, 'Blackboard' | 'Gradescope'>, now = new Date().toISOString()) {
+  const hadSourceBaseline = before.courses.some((item) => item.sources.includes(source)) || before.materials.some((item) => item.source === source) || before.assignments.some((item) => item.source === source)
+  if (!hadSourceBaseline) {
+    const courses = after.courses.filter((item) => item.sources.includes(source))
+    const materials = after.materials.filter((item) => item.source === source && item.kind !== 'folder')
+    const assignments = after.assignments.filter((item) => item.source === source)
+    if (!courses.length && !materials.length && !assignments.length) return []
+    const detail = `${source} 首次同步完成：${courses.length} 门课程、${materials.length} 份资料、${assignments.length} 项作业。历史内容已作为初始基线导入，后续新增和变化才会单独提醒。`
+    return [event(source, 'sync_summary', source, `${courses.length}|${materials.length}|${assignments.length}`, { title: `${source} 首次同步完成`, detail }, now)]
+  }
   const changes: SyncInboxItem[] = []
   const previousCourses = new Map(before.courses.map((item) => [item.id, item]))
   const previousMaterials = new Map(before.materials.map((item) => [item.id, item]))
@@ -54,10 +63,23 @@ export function detectSyncChanges(before: Snapshot, after: Snapshot, source: Ext
     changes.push(event(source, 'course_added', course.id, course.name, { courseId: course.id, title: '发现新课程', detail: course.name }, now))
   }
 
-  for (const material of after.materials) {
-    if (material.source !== source || previousMaterials.has(material.id) || material.kind === 'folder') continue
-    const courseName = courseNames.get(material.courseId) ?? '未知课程'
-    changes.push(event(source, 'material_added', material.id, material.url ?? material.title, { courseId: material.courseId, materialId: material.id, title: '发现新课程资料', detail: `${courseName} · ${material.title}` }, now))
+  const addedMaterials = after.materials.filter((material) => material.source === source && !previousMaterials.has(material.id) && material.kind !== 'folder')
+  const materialsByCourse = new Map<string, Material[]>()
+  for (const material of addedMaterials) {
+    const grouped = materialsByCourse.get(material.courseId) ?? []
+    grouped.push(material)
+    materialsByCourse.set(material.courseId, grouped)
+  }
+  for (const [courseId, materials] of materialsByCourse) {
+    const courseName = courseNames.get(courseId) ?? '未知课程'
+    if (materials.length === 1) {
+      const material = materials[0]
+      changes.push(event(source, 'material_added', material.id, material.url ?? material.title, { courseId, materialId: material.id, title: '发现新课程资料', detail: `${courseName} · ${material.title}` }, now))
+      continue
+    }
+    const examples = materials.slice(0, 3).map((item) => item.title).join('、')
+    const remaining = materials.length > 3 ? ` 等 ${materials.length} 份` : ''
+    changes.push(event(source, 'material_batch_added', courseId, materials.map((item) => item.id).sort().join('|'), { courseId, title: `${courseName} 资料已更新`, detail: `${courseName} · 新增 ${materials.length} 份资料：${examples}${remaining}` }, now))
   }
 
   for (const assignment of after.assignments) {
@@ -96,9 +118,8 @@ export function syncConnectionRequiredItem(source: Extract<SyncInboxSource, 'Bla
 }
 
 export function resolveSyncConnectionItems(items: SyncInboxItem[], source: Extract<SyncInboxSource, 'Blackboard' | 'Gradescope'>, now = new Date().toISOString()) {
-  return items.map((item) => item.kind === 'connection_required' && item.source === source && !item.archivedAt
-    ? { ...item, readAt: item.readAt ?? now, archivedAt: now }
-    : item)
+  void now
+  return items.filter((item) => item.kind !== 'connection_required' || item.source !== source)
 }
 
 export function emailDeliveryInboxItem(status: 'sent' | 'failed', detail: string, fingerprint: string, now = new Date().toISOString()): SyncInboxItem {

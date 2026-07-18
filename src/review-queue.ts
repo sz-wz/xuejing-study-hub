@@ -35,6 +35,7 @@ export type ReviewQueueProgress = {
 }
 
 export type ReviewQueueSelection = { materialIds: string[]; conceptIds: string[]; focus: string; mode: 'manual' }
+export type MemorySchedule = { lastEvidenceAt: string; intervalDays: number; successfulReviews: number; lapses: number; reason: string }
 
 const assessmentReason: Record<MaterialAssessment, string> = {
   1: '上次确认“没看懂”，建议先重新阅读',
@@ -53,25 +54,80 @@ function addDays(date: string, days: number) {
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
 }
 
-function evidenceFor(item: Pick<ReviewQueueItem, 'courseId' | 'materialId' | 'conceptId'>, sessions: Record<string, ReviewSession>) {
+type MemoryEvidence = { at: string; kind: 'assessment'; assessment: MaterialAssessment } | { at: string; kind: 'test'; score: number }
+
+function linkedTestScore(test: NonNullable<ReviewSession['quickTests']>[number], item: Pick<ReviewQueueItem, 'materialId' | 'conceptId'>) {
+  const linked = test.questions.filter((question) => (item.conceptId && question.conceptIds.includes(item.conceptId)) || (item.materialId && question.materialIds.includes(item.materialId)))
+  if (!linked.length) return null
+  const correct = linked.filter((question) => test.answers[question.id] === question.correctIndex).length
+  return Math.round(correct / linked.length * 100)
+}
+
+function memoryEvidenceFor(item: Pick<ReviewQueueItem, 'courseId' | 'materialId' | 'conceptId'>, sessions: Record<string, ReviewSession>) {
   const session = sessions[item.courseId]
-  if (!session) return null
-  const tests = (session.quickTests ?? []).filter((test) => test.status === 'completed').filter((test) => test.questions.some((question) => (item.conceptId && question.conceptIds.includes(item.conceptId)) || (item.materialId && question.materialIds.includes(item.materialId))))
-  const latestTest = tests.sort((left, right) => right.generatedAt.localeCompare(left.generatedAt))[0]
-  const assessment = item.materialId ? session.materialAssessments?.[item.materialId] : undefined
-  const assessedAt = item.materialId && assessment ? session.materialAssessmentAt?.[item.materialId] ?? session.startedAt : undefined
-  if (latestTest && (!assessedAt || latestTest.generatedAt >= assessedAt)) {
-    const linked = latestTest.questions.filter((question) => (item.conceptId && question.conceptIds.includes(item.conceptId)) || (item.materialId && question.materialIds.includes(item.materialId)))
-    const correct = linked.filter((question) => latestTest.answers[question.id] === question.correctIndex).length
-    return { at: latestTest.generatedAt, days: linked.length && correct === linked.length ? 7 : correct / Math.max(1, linked.length) >= .7 ? 4 : 1 }
+  if (!session) return []
+  const evidence: MemoryEvidence[] = []
+  if (item.materialId) {
+    for (const record of session.materialReviewHistory ?? []) {
+      if (record.materialId === item.materialId && record.assessedAt) evidence.push({ at: record.assessedAt, kind: 'assessment', assessment: record.assessment })
+    }
+    const legacyAssessment = session.materialAssessments?.[item.materialId]
+    const legacyAt = session.materialAssessmentAt?.[item.materialId] ?? (legacyAssessment ? session.startedAt : '')
+    if (legacyAssessment && legacyAt && !evidence.some((entry) => entry.kind === 'assessment' && entry.at === legacyAt && entry.assessment === legacyAssessment)) {
+      evidence.push({ at: legacyAt, kind: 'assessment', assessment: legacyAssessment })
+    }
   }
-  if (assessment && assessedAt) return { at: assessedAt, days: ({ 1: 1, 2: 2, 3: 4, 4: 7 } as Record<MaterialAssessment, number>)[assessment] }
-  return null
+  for (const test of session.quickTests ?? []) {
+    if (test.status !== 'completed' || !test.generatedAt) continue
+    const score = linkedTestScore(test, item)
+    if (score !== null) evidence.push({ at: test.generatedAt, kind: 'test', score })
+  }
+  return evidence.sort((left, right) => left.at.localeCompare(right.at))
+}
+
+export function memoryScheduleFor(item: Pick<ReviewQueueItem, 'courseId' | 'materialId' | 'conceptId'>, sessions: Record<string, ReviewSession>): MemorySchedule | null {
+  const evidence = memoryEvidenceFor(item, sessions)
+  if (!evidence.length) return null
+  let intervalDays = 1
+  let successfulReviews = 0
+  let lapses = 0
+  let latestLabel = '最近复习'
+  for (const entry of evidence) {
+    if (entry.kind === 'assessment') {
+      latestLabel = `掌握确认“${({ 1: '没看懂', 2: '有些模糊', 3: '基本理解', 4: '可以解释' } as Record<MaterialAssessment, string>)[entry.assessment]}”`
+      if (entry.assessment <= 2) {
+        intervalDays = entry.assessment === 1 ? 1 : 2
+        lapses += 1
+      } else {
+        const base = entry.assessment === 3 ? 4 : 7
+        intervalDays = successfulReviews ? Math.max(base, Math.round(intervalDays * (entry.assessment === 3 ? 1.65 : 2.15))) : base
+        successfulReviews += 1
+      }
+      continue
+    }
+    latestLabel = `最近测试 ${entry.score}%`
+    if (entry.score < 60) {
+      intervalDays = 1
+      lapses += 1
+    } else if (entry.score < 80) {
+      intervalDays = successfulReviews ? Math.max(2, Math.round(intervalDays * 0.65)) : 3
+      successfulReviews += 1
+    } else if (entry.score < 90) {
+      intervalDays = successfulReviews ? Math.max(5, Math.round(intervalDays * 1.7)) : 5
+      successfulReviews += 1
+    } else {
+      intervalDays = successfulReviews ? Math.max(7, Math.round(intervalDays * 2.15)) : 7
+      successfulReviews += 1
+    }
+  }
+  intervalDays = Math.max(1, Math.min(90, intervalDays))
+  const memoryStage = lapses ? `已出现 ${lapses} 次遗忘信号` : successfulReviews > 1 ? `连续稳定 ${successfulReviews} 次` : '正在建立首次记忆'
+  return { lastEvidenceAt: evidence.at(-1)!.at, intervalDays, successfulReviews, lapses, reason: `按遗忘曲线：${latestLabel}，${memoryStage}，建议 ${intervalDays} 天后巩固` }
 }
 
 export function suggestedNextReviewDate(item: Pick<ReviewQueueItem, 'courseId' | 'materialId' | 'conceptId'>, sessions: Record<string, ReviewSession>) {
-  const evidence = evidenceFor(item, sessions)
-  return evidence ? addDays(evidence.at.slice(0, 10), evidence.days) : null
+  const schedule = memoryScheduleFor(item, sessions)
+  return schedule ? addDays(schedule.lastEvidenceAt.slice(0, 10), schedule.intervalDays) : null
 }
 
 export function reviewQueueProgress(item: Pick<ReviewQueueItem, 'courseId' | 'materialId' | 'conceptId'> & Partial<Pick<ReviewQueueItem, 'id'>>, sessions: Record<string, ReviewSession>): ReviewQueueProgress {
@@ -171,9 +227,11 @@ export function buildReviewQueue(documents: QueueDocument[], concepts: QueueConc
   for (const document of documentById.values()) {
     const item: ReviewQueueItem = { id: `interval:${document.materialId}`, courseId: document.courseId, courseName: document.courseName, title: document.title, reason: '', priority: 88, materialId: document.materialId }
     if (scheduleByTarget.has(reviewTargetKey(item))) continue
-    const dueDate = suggestedNextReviewDate(item, sessions)
-    if (!dueDate || dueDate > today) continue
-    candidates.push({ ...item, reason: dueDate < today ? `间隔复习已于 ${dueDate} 到期` : '根据上次掌握结果，今天适合再次复习', scheduledDate: dueDate, scheduleSource: 'interval' })
+    const memory = memoryScheduleFor(item, sessions)
+    if (!memory) continue
+    const dueDate = addDays(memory.lastEvidenceAt.slice(0, 10), memory.intervalDays)
+    if (dueDate > today) continue
+    candidates.push({ ...item, reason: `${dueDate < today ? `间隔复习已于 ${dueDate} 到期` : '今天进入复习窗口'}；${memory.reason}`, scheduledDate: dueDate, scheduleSource: 'interval' })
   }
 
   const courseWithCandidate = new Set(candidates.map((item) => item.courseId))

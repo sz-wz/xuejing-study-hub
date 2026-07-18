@@ -64,14 +64,19 @@ describe('buildRoute', () => {
 describe('recordMaterialAssessment', () => {
   it('records a low-friction document assessment without changing completion or concept selection', () => {
     const session: ReviewSession = { active: true, materialIds: ['a'], conceptIds: ['c'], completedMaterialIds: ['a'], startedAt: '2026-07-13T00:00:00.000Z' }
-    expect(recordMaterialAssessment(session, 'a', 3, '2026-07-13T01:00:00.000Z')).toEqual({ ...session, materialAssessments: { a: 3 }, materialAssessmentAt: { a: '2026-07-13T01:00:00.000Z' } })
+    expect(recordMaterialAssessment(session, 'a', 3, '2026-07-13T01:00:00.000Z')).toEqual({ ...session, materialAssessments: { a: 3 }, materialAssessmentAt: { a: '2026-07-13T01:00:00.000Z' }, materialReviewHistory: [{ materialId: 'a', assessment: 3, assessedAt: '2026-07-13T01:00:00.000Z' }] })
+  })
+
+  it('treats an immediate rating change as a correction instead of a second successful review', () => {
+    const session: ReviewSession = { active: true, materialIds: ['a'], conceptIds: [], completedMaterialIds: ['a'], materialAssessments: { a: 3 }, materialAssessmentAt: { a: '2026-07-13T01:00:00.000Z' }, materialReviewHistory: [{ materialId: 'a', assessment: 3, assessedAt: '2026-07-13T01:00:00.000Z' }], startedAt: '2026-07-13T00:00:00.000Z' }
+    expect(recordMaterialAssessment(session, 'a', 4, '2026-07-13T01:03:00.000Z').materialReviewHistory).toEqual([{ materialId: 'a', assessment: 4, assessedAt: '2026-07-13T01:03:00.000Z' }])
   })
 })
 
 describe('finishReviewSession', () => {
   it('preserves progress and stores the exit assessment instead of deleting the session', () => {
     const session: ReviewSession = { active: true, materialIds: ['a'], conceptIds: ['c'], completedMaterialIds: [], startedAt: '2026-07-13T00:00:00.000Z' }
-    expect(finishReviewSession(session, 'a', 2, '2026-07-13T01:00:00.000Z')).toEqual({ ...session, active: false, completedMaterialIds: ['a'], materialAssessments: { a: 2 }, materialAssessmentAt: { a: '2026-07-13T01:00:00.000Z' } })
+    expect(finishReviewSession(session, 'a', 2, '2026-07-13T01:00:00.000Z')).toEqual({ ...session, active: false, completedMaterialIds: ['a'], materialAssessments: { a: 2 }, materialAssessmentAt: { a: '2026-07-13T01:00:00.000Z' }, materialReviewHistory: [{ materialId: 'a', assessment: 2, assessedAt: '2026-07-13T01:00:00.000Z' }] })
   })
 
   it('allows ending without forcing an assessment', () => {
@@ -84,6 +89,6 @@ describe('createReviewSession', () => {
   it('uses the newly selected content while preserving historical evidence', () => {
     const previous: ReviewSession = { active: false, materialIds: ['old'], conceptIds: ['old-concept'], completedMaterialIds: ['old'], materialAssessments: { old: 2 }, quickTests: [], startedAt: 'old' }
     const next = createReviewSession(['new'], ['new-concept'], previous)
-    expect(next).toMatchObject({ active: true, materialIds: ['new'], conceptIds: ['new-concept'], activeDocumentId: 'new', completedMaterialIds: [], materialAssessments: { old: 2 }, materialAssessmentAt: {} })
+    expect(next).toMatchObject({ active: true, materialIds: ['new'], conceptIds: ['new-concept'], activeDocumentId: 'new', completedMaterialIds: [], materialAssessments: { old: 2 }, materialAssessmentAt: {}, materialReviewHistory: [] })
   })
 })

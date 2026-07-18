@@ -8,13 +8,16 @@ const { parseBlackboardAssignmentDetails } = require('./blackboard-assignment.cj
 const { extractAssignmentText } = require('./assignment-analysis.cjs')
 const { GRADESCOPE_ORIGIN, classifyGradescopePage, hasGradescopeSessionCookie, isGradescopeAuthenticatedPage, parseGradescopeAssignments, parseGradescopeCourses } = require('./gradescope-portal.cjs')
 const { findBlackboardCachedFiles, importAssignmentFilesToVault, importBufferToVault, importFilesToVault, migrateVault, removeAssignmentFilesFromVault, repairVaultExtensions, verifyVaultFiles } = require('./vault.cjs')
-const { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, ocrKnowledgeDocument, ocrKnowledgeDocuments, refineKnowledgeDocument, refineKnowledgeDocuments, readKnowledgeDocumentContent, searchKnowledgeDocuments } = require('./knowledge.cjs')
+const { buildKnowledgeIndex, extractLocalDocumentText, knowledgeStatus, normalizeCourseKnowledgeConcepts, ocrKnowledgeDocument, ocrKnowledgeDocuments, refineKnowledgeDocument, refineKnowledgeDocuments, reindexKnowledgeDocument, reindexKnowledgeDocuments, readKnowledgeDocumentContent, searchKnowledgeDocuments, updateKnowledgePageLocation } = require('./knowledge.cjs')
 const { findPreviewDocument, readPreviewFile } = require('./document-preview.cjs')
-const { refineKnowledgeWithCloud, testCloudConnection, chatWithCloud } = require('./cloud-knowledge.cjs')
+const { refineDocumentWithCloud, refineKnowledgeWithCloud, mapConceptPagesWithCloud, normalizeCourseConceptsWithCloud, testCloudConnection, chatWithCloud } = require('./cloud-knowledge.cjs')
+const { listProviderModels, normalizeCapabilities, normalizeProvider, providerPresets } = require('./ai-providers.cjs')
+const { cleanupExactDuplicates, inspectMaterialVersions } = require('./material-versions.cjs')
 const { sendToRenderer } = require('./renderer-events.cjs')
 const { normalizeAppBehavior } = require('./app-preferences.cjs')
 const { createTrayIconPng } = require('./tray-icon.cjs')
 const { buildDeadlineDigestMessage, buildDeadlineMessage, buildSyncUpdateMessage, normalizeEmailSettings, publicEmailSettings, sendMail, testEmailConnection, validateEmailSettings } = require('./email-notifications.cjs')
+const { createRefinementJobManager } = require('./refinement-jobs.cjs')
 
 const isDev = !app.isPackaged
 const BLACKBOARD_ORIGIN = 'https://elearning.shanghaitech.edu.cn:8443'
@@ -34,6 +37,7 @@ let gradescopeSessionKnownInvalid = false
 let tray
 let isQuitting = false
 let appBehavior = normalizeAppBehavior()
+let refinementJobs
 
 function getBlackboardSession() {
   return session.fromPartition(BLACKBOARD_PARTITION)
@@ -128,10 +132,13 @@ async function saveVaultRoot(vaultRoot) {
 
 function publicAiSettings(settings) {
   const ai = settings.ai && typeof settings.ai === 'object' ? settings.ai : {}
+  const provider = normalizeProvider(ai.provider, ai.baseUrl)
   return {
     configured: Boolean(ai.encryptedApiKey && ai.baseUrl && ai.model),
+    provider,
     baseUrl: typeof ai.baseUrl === 'string' ? ai.baseUrl : '',
     model: typeof ai.model === 'string' ? ai.model : '',
+    capabilities: normalizeCapabilities(ai.capabilities, provider, ai.baseUrl),
   }
 }
 
@@ -195,6 +202,7 @@ async function sendDeadlineDigestEmail(payload) {
 async function saveAiSettings(payload) {
   const baseUrl = typeof payload?.baseUrl === 'string' ? payload.baseUrl.trim().replace(/\/+$/, '') : ''
   const model = typeof payload?.model === 'string' ? payload.model.trim() : ''
+  const provider = normalizeProvider(payload?.provider, baseUrl)
   const apiKey = typeof payload?.apiKey === 'string' ? payload.apiKey.trim() : ''
   if (!baseUrl || !model) throw new Error('请填写云端 API 地址和模型名称')
   try {
@@ -206,9 +214,12 @@ async function saveAiSettings(payload) {
   if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储不可用，无法保存云端 API 密钥')
   const existing = await readSettings()
   const currentAi = existing.ai && typeof existing.ai === 'object' ? existing.ai : {}
-  const encryptedApiKey = apiKey ? safeStorage.encryptString(apiKey).toString('base64') : currentAi.encryptedApiKey
+  const sameEndpoint = currentAi.baseUrl === baseUrl && normalizeProvider(currentAi.provider, currentAi.baseUrl) === provider
+  const encryptedApiKey = apiKey ? safeStorage.encryptString(apiKey).toString('base64') : sameEndpoint ? currentAi.encryptedApiKey : undefined
   if (!encryptedApiKey) throw new Error('请首次保存时填写云端 API 密钥')
-  const settings = { ...existing, ai: { baseUrl, model, encryptedApiKey } }
+  const unchangedTarget = sameEndpoint && currentAi.model === model
+  const capabilities = normalizeCapabilities(payload?.capabilities ?? (unchangedTarget ? currentAi.capabilities : undefined), provider, baseUrl)
+  const settings = { ...existing, ai: { provider, baseUrl, model, encryptedApiKey, ...(capabilities ? { capabilities } : {}) } }
   await writeSettings(settings)
   return publicAiSettings(settings)
 }
@@ -218,7 +229,62 @@ async function privateAiSettings() {
   const ai = settings.ai && typeof settings.ai === 'object' ? settings.ai : {}
   if (!ai.encryptedApiKey || !ai.baseUrl || !ai.model) throw new Error('请先在 AI 设置中保存云端 API 配置')
   if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储不可用，无法读取云端 API 密钥')
-  return { baseUrl: ai.baseUrl, model: ai.model, apiKey: safeStorage.decryptString(Buffer.from(ai.encryptedApiKey, 'base64')) }
+  const provider = normalizeProvider(ai.provider, ai.baseUrl)
+  return { provider, baseUrl: ai.baseUrl, model: ai.model, capabilities: normalizeCapabilities(ai.capabilities, provider, ai.baseUrl), apiKey: safeStorage.decryptString(Buffer.from(ai.encryptedApiKey, 'base64')) }
+}
+
+function refinementJobsPath() {
+  return path.join(app.getPath('userData'), 'ai-refinement-jobs.json')
+}
+
+function createRefinementJobs() {
+  return createRefinementJobManager({
+    statePath: refinementJobsPath(),
+    onChange: (job) => sendToRenderer(mainWindow, 'knowledge:refinement-job-change', job),
+    executeItem: async ({ job, materialId, documents, checkpoint, signal, onProgress, onCheckpoint }) => {
+      const settings = await vaultSettings()
+      const ai = await privateAiSettings()
+      return refineKnowledgeDocument({
+        root: settings.vaultRoot,
+        documents,
+        materialId,
+        force: job.force,
+        onProgress: (progress) => { void onProgress({ itemCompleted: progress.completed, itemTotal: progress.total, title: progress.title }) },
+        refine: (document, reportCloudProgress) => {
+          const saved = checkpoint?.sourceHash === document.hash && checkpoint?.model === ai.model ? checkpoint.data : null
+          if (job.mode === 'original') return refineDocumentWithCloud({ config: ai, document, signal, checkpoint: saved, onProgress: (progress) => {
+            reportCloudProgress(progress)
+            void onProgress({ itemCompleted: progress.completed, itemTotal: progress.total, title: progress.title })
+          }, onCheckpoint: (data) => onCheckpoint({ sourceHash: document.hash, model: ai.model, mode: 'original', data }) })
+          return refineKnowledgeWithCloud({
+            config: ai,
+            document,
+            mode: job.mode,
+            checkpoint: saved,
+            signal,
+            onProgress: (progress) => {
+              reportCloudProgress(progress)
+              void onProgress({ itemCompleted: progress.completed, itemTotal: progress.total, title: progress.title })
+            },
+            onCheckpoint: (data) => onCheckpoint({ sourceHash: document.hash, model: ai.model, mode: job.mode, data }),
+          })
+        },
+      })
+    },
+    finalizeJob: async ({ job, documents, signal, onProgress }) => {
+      const settings = await vaultSettings()
+      const ai = await privateAiSettings()
+      const courseIds = [...new Set(documents.filter((document) => job.completedIds.includes(document.materialId)).map((document) => document.courseId).filter(Boolean))]
+      if (!courseIds.length) return
+      await normalizeCourseKnowledgeConcepts({
+        root: settings.vaultRoot,
+        documents,
+        courseIds,
+        onProgress,
+        normalize: (courses, reportProgress) => normalizeCourseConceptsWithCloud({ config: ai, courses, signal, onProgress: reportProgress }),
+      })
+    },
+  })
 }
 
 function publicBlackboardCredentials(settings) {
@@ -322,11 +388,14 @@ async function aiSettingsForTest(payload) {
   const saved = settings.ai && typeof settings.ai === 'object' ? settings.ai : {}
   const baseUrl = typeof payload?.baseUrl === 'string' && payload.baseUrl.trim() ? payload.baseUrl.trim().replace(/\/+$/, '') : saved.baseUrl
   const model = typeof payload?.model === 'string' && payload.model.trim() ? payload.model.trim() : saved.model
+  const provider = normalizeProvider(payload?.provider ?? saved.provider, baseUrl)
   const suppliedKey = typeof payload?.apiKey === 'string' ? payload.apiKey.trim() : ''
-  if (suppliedKey) return { baseUrl, model, apiKey: suppliedKey }
+  if (suppliedKey) return { provider, baseUrl, model, apiKey: suppliedKey }
+  const savedProvider = normalizeProvider(saved.provider, saved.baseUrl)
+  if (baseUrl !== saved.baseUrl || provider !== savedProvider) throw new Error('切换 AI 服务或 API 地址后，请填写该服务对应的 API 密钥')
   if (!saved.encryptedApiKey) throw new Error('请填写 API 密钥，或先保存一份可复用的 AI 配置')
   if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储不可用，无法读取已保存的云端 API 密钥')
-  return { baseUrl, model, apiKey: safeStorage.decryptString(Buffer.from(saved.encryptedApiKey, 'base64')) }
+  return { provider, baseUrl, model, apiKey: safeStorage.decryptString(Buffer.from(saved.encryptedApiKey, 'base64')) }
 }
 
 function isTrustedBlackboardUrl(url) {
@@ -787,7 +856,7 @@ ipcMain.handle('knowledge:refine', async (_event, payload) => {
     documents: knowledgeDocuments(payload),
     materialId: typeof payload?.materialId === 'string' ? payload.materialId : '',
     force: payload?.force === true,
-    refine: (document) => refineKnowledgeWithCloud({ config: ai, document }),
+    refine: (document, onProgress) => refineDocumentWithCloud({ config: ai, document, onProgress }),
     onProgress: (progress) => sendToRenderer(mainWindow, 'knowledge:progress', progress),
   })
 })
@@ -800,14 +869,72 @@ ipcMain.handle('knowledge:refine-batch', async (_event, payload) => {
     root: settings.vaultRoot,
     documents: knowledgeDocuments(payload),
     materialIds: Array.isArray(payload?.materialIds) ? payload.materialIds : [],
-    refine: (document) => refineKnowledgeWithCloud({ config: ai, document }),
+    force: payload?.force === true,
+    refine: (document, onProgress) => refineDocumentWithCloud({ config: ai, document, onProgress }),
     onProgress: (progress) => sendToRenderer(mainWindow, 'knowledge:progress', progress),
   })
 })
+ipcMain.handle('knowledge:reindex-pages', async (_event, payload) => {
+  const settings = await vaultSettings()
+  const useCloud = payload?.useCloud !== false
+  let ai = null
+  let aiSettingsError = null
+  if (useCloud) {
+    try { ai = await privateAiSettings() } catch (error) { aiSettingsError = error }
+  }
+  return reindexKnowledgeDocument({
+    root: settings.vaultRoot,
+    documents: knowledgeDocuments(payload),
+    materialId: typeof payload?.materialId === 'string' ? payload.materialId : '',
+    mapPages: ai ? async (document, onProgress) => ({ model: ai.model, mappings: await mapConceptPagesWithCloud({ config: ai, document, concepts: document.concepts, cards: document.cards, onProgress }) }) : aiSettingsError ? async () => { throw aiSettingsError } : undefined,
+    onProgress: (progress) => sendToRenderer(mainWindow, 'knowledge:progress', progress),
+  })
+})
+ipcMain.handle('knowledge:reindex-pages-batch', async (_event, payload) => {
+  const settings = await vaultSettings()
+  const useCloud = payload?.useCloud !== false
+  let ai = null
+  let aiSettingsError = null
+  if (useCloud) {
+    try { ai = await privateAiSettings() } catch (error) { aiSettingsError = error }
+  }
+  return reindexKnowledgeDocuments({
+    root: settings.vaultRoot,
+    documents: knowledgeDocuments(payload),
+    materialIds: Array.isArray(payload?.materialIds) ? payload.materialIds : [],
+    mapPages: ai ? async (document, onProgress) => ({ model: ai.model, mappings: await mapConceptPagesWithCloud({ config: ai, document, concepts: document.concepts, cards: document.cards, onProgress }) }) : aiSettingsError ? async () => { throw aiSettingsError } : undefined,
+    onProgress: (progress) => sendToRenderer(mainWindow, 'knowledge:progress', progress),
+  })
+})
+ipcMain.handle('knowledge:update-page-location', async (_event, payload) => {
+  const settings = await vaultSettings()
+  return updateKnowledgePageLocation({
+    root: settings.vaultRoot,
+    documents: knowledgeDocuments(payload),
+    materialId: typeof payload?.materialId === 'string' ? payload.materialId : '',
+    conceptTitle: typeof payload?.conceptTitle === 'string' ? payload.conceptTitle : '',
+    action: typeof payload?.action === 'string' ? payload.action : '',
+    location: payload?.location,
+  })
+})
+ipcMain.handle('knowledge:refinement-jobs', async () => refinementJobs.list())
+ipcMain.handle('knowledge:start-refinement-job', async (_event, payload) => refinementJobs.start({
+  courseId: typeof payload?.courseId === 'string' ? payload.courseId : '',
+  mode: 'original',
+  force: payload?.force === true,
+  documents: knowledgeDocuments(payload),
+  materialIds: Array.isArray(payload?.materialIds) ? payload.materialIds : [],
+}))
+ipcMain.handle('knowledge:pause-refinement-job', async (_event, jobId) => refinementJobs.pause(typeof jobId === 'string' ? jobId : ''))
+ipcMain.handle('knowledge:cancel-refinement-job', async (_event, jobId) => refinementJobs.cancel(typeof jobId === 'string' ? jobId : ''))
+ipcMain.handle('knowledge:resume-refinement-job', async (_event, payload) => refinementJobs.resume(typeof payload?.jobId === 'string' ? payload.jobId : '', { restart: payload?.restart === true }))
+ipcMain.handle('knowledge:dismiss-refinement-job', async (_event, jobId) => refinementJobs.dismiss(typeof jobId === 'string' ? jobId : ''))
 
 ipcMain.handle('ai:settings', async () => aiSettings())
+ipcMain.handle('ai:presets', async () => providerPresets())
 ipcMain.handle('ai:save-settings', async (_event, payload) => saveAiSettings(payload))
 ipcMain.handle('ai:test-connection', async (_event, payload) => testCloudConnection({ config: await aiSettingsForTest(payload) }))
+ipcMain.handle('ai:list-models', async (_event, payload) => listProviderModels({ config: await aiSettingsForTest({ ...payload, model: payload?.model || '__model_list__' }) }))
 ipcMain.handle('ai:chat', async (_event, payload) => chatWithCloud({
   config: await privateAiSettings(),
   context: typeof payload?.context === 'string' ? payload.context : '',
@@ -857,6 +984,16 @@ ipcMain.handle('vault:repair-extensions', async () => {
   const settings = await vaultSettings()
   const result = await repairVaultExtensions(settings.vaultRoot)
   return { ...result, vaultRoot: settings.vaultRoot }
+})
+
+ipcMain.handle('vault:material-versions', async (_event, payload) => {
+  const settings = await vaultSettings()
+  return inspectMaterialVersions({ root: settings.vaultRoot, documents: knowledgeDocuments(payload), recordLoader: extractLocalDocumentText })
+})
+
+ipcMain.handle('vault:cleanup-duplicates', async (_event, payload) => {
+  const settings = await vaultSettings()
+  return cleanupExactDuplicates({ root: settings.vaultRoot, documents: knowledgeDocuments(payload), paths: Array.isArray(payload?.paths) ? payload.paths : [] })
 })
 
 ipcMain.handle('blackboard:open-submission', async (_event, url) => {
@@ -966,6 +1103,8 @@ ipcMain.handle('gradescope:disconnect', async () => {
 app.whenReady().then(async () => {
   appBehavior = await appBehaviorSettings()
   await restoreGradescopeSession()
+  refinementJobs = createRefinementJobs()
+  await refinementJobs.initialize()
   syncTray()
   createWindow()
   app.on('activate', showMainWindow)

@@ -7,9 +7,28 @@ const assignment: Assignment = { id: 'a1', courseId: 'c1', source: 'Blackboard',
 
 describe('同步变更收件箱', () => {
   it('识别新课程、新资料和新作业', () => {
+    const existing: Course = { id: 'existing', code: 'OLD', name: '已有课程', instructor: '', color: '#456', sources: ['Blackboard'] }
     const material: Material = { id: 'm1', courseId: 'c1', title: 'Lecture 1.pdf', type: 'PDF', source: 'Blackboard', meta: '', concepts: [], kind: 'file', url: 'https://example.edu/m1' }
-    const changes = detectSyncChanges({ courses: [], materials: [], assignments: [] }, { courses: [course], materials: [material], assignments: [assignment] }, 'Blackboard', '2026-07-13T01:00:00.000Z')
+    const changes = detectSyncChanges({ courses: [existing], materials: [], assignments: [] }, { courses: [existing, course], materials: [material], assignments: [assignment] }, 'Blackboard', '2026-07-13T01:00:00.000Z')
     expect(changes.map((item) => item.kind)).toEqual(['course_added', 'material_added', 'assignment_added'])
+  })
+
+  it('首次平台同步只生成一条基线摘要，不为每份历史资料创建收件箱消息', () => {
+    const materials = Array.from({ length: 400 }, (_, index): Material => ({ id: `m${index}`, courseId: 'c1', title: `Lecture ${index}.pdf`, type: 'PDF', source: 'Blackboard', meta: '', concepts: [], kind: 'file', url: `https://example.edu/m${index}` }))
+    const changes = detectSyncChanges({ courses: [], materials: [], assignments: [] }, { courses: [course], materials, assignments: [assignment] }, 'Blackboard', '2026-07-13T01:00:00.000Z')
+    expect(changes).toHaveLength(1)
+    expect(changes[0].kind).toBe('sync_summary')
+    expect(changes[0].detail).toContain('400 份资料')
+  })
+
+  it('后续同步会把同一课程的多份新资料折叠为一个批次摘要', () => {
+    const before = { courses: [course], materials: [], assignments: [assignment] }
+    const materials = Array.from({ length: 20 }, (_, index): Material => ({ id: `m${index}`, courseId: 'c1', title: `Lecture ${index}.pdf`, type: 'PDF', source: 'Blackboard', meta: '', concepts: [], kind: 'file', url: `https://example.edu/m${index}` }))
+    const changes = detectSyncChanges(before, { ...before, materials }, 'Blackboard', '2026-07-13T01:00:00.000Z')
+    expect(changes).toHaveLength(1)
+    expect(changes[0].kind).toBe('material_batch_added')
+    expect(changes[0].detail).toContain('新增 20 份资料')
+    expect(changes[0].detail).toContain('Lecture 0.pdf')
   })
 
   it('识别 DDL、状态和成绩变化，但重复同步不会产生变化', () => {
@@ -20,7 +39,8 @@ describe('同步变更收件箱', () => {
   })
 
   it('合并时按稳定事件 ID 去重，并支持已读和归档', () => {
-    const changes = detectSyncChanges({ courses: [], materials: [], assignments: [] }, { courses: [course], materials: [], assignments: [assignment] }, 'Blackboard', '2026-07-13T01:00:00.000Z')
+    const material: Material = { id: 'm1', courseId: 'c1', title: 'Lecture 1.pdf', type: 'PDF', source: 'Blackboard', meta: '', concepts: [], kind: 'file', url: 'https://example.edu/m1' }
+    const changes = detectSyncChanges({ courses: [course], materials: [], assignments: [] }, { courses: [course], materials: [material], assignments: [assignment] }, 'Blackboard', '2026-07-13T01:00:00.000Z')
     const merged = mergeSyncInbox(changes, changes)
     expect(merged).toHaveLength(2)
     expect(unreadSyncInboxCount(merged)).toBe(2)
@@ -36,12 +56,11 @@ describe('同步变更收件箱', () => {
     expect(mergeSyncInbox([first], [second])).toHaveLength(1)
   })
 
-  it('平台恢复连接后自动归档对应的登录提示', () => {
+  it('平台恢复连接后移除对应的临时登录提示', () => {
     const blackboard = syncConnectionRequiredItem('Blackboard', '请重新登录', '2026-07-13T01:00:00.000Z')
     const gradescope = syncConnectionRequiredItem('Gradescope', '请重新登录', '2026-07-13T01:00:00.000Z')
     const resolved = resolveSyncConnectionItems([blackboard, gradescope], 'Blackboard', '2026-07-13T02:00:00.000Z')
-    expect(resolved[0]).toMatchObject({ readAt: '2026-07-13T02:00:00.000Z', archivedAt: '2026-07-13T02:00:00.000Z' })
-    expect(resolved[1].archivedAt).toBeUndefined()
+    expect(resolved).toEqual([gradescope])
   })
 
   it('邮件投递结果使用提醒指纹去重', () => {
