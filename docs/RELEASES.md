@@ -2,11 +2,20 @@
 
 ## 当前版本
 
-- 源码版本：`1.1.0`
+- 源码版本：`1.2.0`
 - 当前免安装构建：`release/win-unpacked/学径.exe`
-- 当前安装包：`release/Xuejing-1.1.0-win-x64.exe`
-- 当前安装包 SHA-256：`9AE3679C594DD723A56883224161139EFE2C60C9B12BCFF0B86B6ED1C76F0065`
+- 当前安装包：`release/Xuejing-1.2.0-win-x64.exe`
+- 当前安装包 SHA-256：`5A438CF20BB0040D703B8583DD9580852062E0B6F0472933BCE281B413142493`
+- 当前免安装归档：`release/Xuejing-1.2.0-win-x64-portable.zip`
+- 当前免安装归档 SHA-256：`91297F7489FEC7997997A954A64B58DCC189629B0105E46551B9B9FE3439631A`
 - 版本号需要同时更新 `package.json`、`package-lock.json`、`electron/preload.cjs`、`README.md`、`PRODUCT.md` 和 `docs/PROGRESS.md`。
+
+## v1.2.0 参赛增强版
+
+- 冻结日期：2026-07-19。
+- 新增成长图鉴、月度学习日历、三级庆祝、统一品牌图标与单实例保护。
+- 参赛说明、演示脚本、旁白 PPTX 和 1920×1080 演示视频同步更新。
+- 当前安装包与免安装版已从同一份 `1.2.0` 源码构建，并完成启动、单实例和版本验证。
 
 ## v1.1.0 参赛冻结版
 
@@ -36,10 +45,10 @@ npm run build
 npm run package:win
 ```
 
-构建完成后，免安装版位于 `release/win-unpacked/`，安装包位于 `release/`。
+构建完成后，免安装版位于 `release/win-unpacked/`，安装包位于 `release/`。发布工作流还会将免安装目录压缩为 `Xuejing-<版本>-win-x64-portable.zip`，与安装包一同上传。
 
 ## GitHub 发布
 
 - 普通提交和 Pull Request 会运行 `.github/workflows/ci.yml`。
-- 推送形如 `v1.1.0` 的标签后，`.github/workflows/release.yml` 会在 Windows 环境重新测试、打包并创建 GitHub Release。
+- 推送形如 `v1.2.0` 的标签后，`.github/workflows/release.yml` 会在 Windows 环境重新测试、打包并创建 GitHub Release。
 - Git 仓库只保存源码、测试和文档；历史 `.exe`、解压目录、`node_modules` 和 `dist` 不上传。

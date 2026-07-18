@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+const test = require('node:test')
+
+test('主进程在创建窗口前申请单实例锁，并在第二次启动时唤醒已有窗口', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'entry.cjs'), 'utf8')
+  const lockIndex = source.indexOf('app.requestSingleInstanceLock()')
+  const readyIndex = source.indexOf('app.whenReady()')
+  assert.ok(lockIndex >= 0, '缺少 requestSingleInstanceLock')
+  assert.ok(readyIndex >= 0, '缺少 app.whenReady')
+  assert.ok(lockIndex < readyIndex, '单实例锁必须在窗口初始化前申请')
+  assert.match(source, /if\s*\(!hasSingleInstanceLock\)\s*\{\s*app\.quit\(\)/s)
+  assert.match(source, /app\.on\('second-instance',[\s\S]*showMainWindow\(\)/s)
+})

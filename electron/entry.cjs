@@ -1,6 +1,7 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, safeStorage, session, shell, Tray } = require('electron')
 const path = require('path')
 const fs = require('fs/promises')
+const fsSync = require('fs')
 const { classifyBlackboardPage, parseCourseLinks } = require('./blackboard-portal.cjs')
 const { createSuccessfulLoginGate } = require('./blackboard-connection.cjs')
 const { parseAttachments, parseContentLinks, parseExternalLinks } = require('./blackboard-content.cjs')
@@ -20,6 +21,7 @@ const { buildDeadlineDigestMessage, buildDeadlineMessage, buildSyncUpdateMessage
 const { createRefinementJobManager } = require('./refinement-jobs.cjs')
 
 const isDev = !app.isPackaged
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
 const BLACKBOARD_ORIGIN = 'https://elearning.shanghaitech.edu.cn:8443'
 const BLACKBOARD_PORTAL_URL = `${BLACKBOARD_ORIGIN}/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1`
 const BLACKBOARD_PARTITION = 'persist:shanghaitech-blackboard'
@@ -75,7 +77,14 @@ async function appBehaviorSettings() {
 }
 
 function trayIcon() {
-  return nativeImage.createFromBuffer(createTrayIconPng()).resize({ width: 16, height: 16 })
+  const assetPath = path.join(__dirname, 'assets', 'tray-icon.png')
+  const image = fsSync.existsSync(assetPath) ? nativeImage.createFromPath(assetPath) : nativeImage.createFromBuffer(createTrayIconPng())
+  return image.resize({ width: 16, height: 16 })
+}
+
+function windowIcon() {
+  const assetPath = path.join(__dirname, 'assets', 'app-icon.png')
+  return fsSync.existsSync(assetPath) ? nativeImage.createFromPath(assetPath) : nativeImage.createFromBuffer(createTrayIconPng())
 }
 
 function showMainWindow() {
@@ -702,7 +711,7 @@ async function removeAssignmentFiles(payload) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1440, height: 920, minWidth: 1080, minHeight: 720, backgroundColor: '#f6f7f3', autoHideMenuBar: true, icon: trayIcon(),
+    width: 1440, height: 920, minWidth: 1080, minHeight: 720, backgroundColor: '#f6f7f3', autoHideMenuBar: true, icon: windowIcon(),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
   })
   mainWindow.on('close', (event) => {
@@ -1100,15 +1109,24 @@ ipcMain.handle('gradescope:disconnect', async () => {
   return { connected: false }
 })
 
-app.whenReady().then(async () => {
-  appBehavior = await appBehaviorSettings()
-  await restoreGradescopeSession()
-  refinementJobs = createRefinementJobs()
-  await refinementJobs.initialize()
-  syncTray()
-  createWindow()
-  app.on('activate', showMainWindow)
-})
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (app.isReady()) showMainWindow()
+  })
+
+  app.whenReady().then(async () => {
+    app.setAppUserModelId('com.xuejing.studyhub')
+    appBehavior = await appBehaviorSettings()
+    await restoreGradescopeSession()
+    refinementJobs = createRefinementJobs()
+    await refinementJobs.initialize()
+    syncTray()
+    createWindow()
+    app.on('activate', showMainWindow)
+  })
+}
 
 app.on('before-quit', () => { isQuitting = true })
 

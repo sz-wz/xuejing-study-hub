@@ -112,4 +112,5 @@ export type JournalEntry = {
   date: string
   content: string
   mood: '轻松' | '平稳' | '吃力'
+  updatedAt?: string
 }

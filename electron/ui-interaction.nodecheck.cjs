@@ -67,3 +67,14 @@ test('启动自动同步会等待平台状态恢复完成', () => {
   assert.match(source, /if \(!platformStatusReady\)/)
   assert.match(source, /Promise\.allSettled\(\[bridge\.blackboard\.status\(\), bridge\.gradescope\.status\(\)\]\)/)
 })
+
+test('课程资料与知识库操作栏在窄内容区保持横向文字并安全换行', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'App.tsx'), 'utf8')
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'styles.css'), 'utf8')
+  assert.match(source, /page-heading action-heading/)
+  assert.match(styles, /\.library-actions[^}]*flex-wrap:\s*wrap/s)
+  assert.match(styles, /\.knowledge-actions[^}]*flex-wrap:\s*wrap/s)
+  assert.match(styles, /\.library-actions\s*>\s*button[^}]*white-space:\s*nowrap/s)
+  assert.match(styles, /\.knowledge-actions\s*>\s*button[^}]*white-space:\s*nowrap/s)
+  assert.match(styles, /@media\s*\(max-width:\s*1500px\)[\s\S]*\.page-heading\.action-heading[^}]*flex-direction:\s*column/s)
+})

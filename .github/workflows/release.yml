@@ -22,13 +22,22 @@ jobs:
       - run: npm test
       - run: npm run typecheck
       - run: npm run package:win
+      - name: Build portable archive
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          Compress-Archive -Path release/win-unpacked/* -DestinationPath "release/Xuejing-$version-win-x64-portable.zip" -Force
       - uses: actions/upload-artifact@v4
         with:
           name: xuejing-windows-${{ github.ref_name }}
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/*-portable.zip
           retention-days: 14
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: release/*.exe
+          files: |
+            release/*.exe
+            release/*-portable.zip
           generate_release_notes: true

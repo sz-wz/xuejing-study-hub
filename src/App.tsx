@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
-  BookOpen, CalendarDays, ChevronDown, ChevronRight, CloudDownload, Database, FileText,
-  Archive, BookOpenCheck, Command as CommandIcon, Folder, FolderOpen, GraduationCap, Inbox, Link2, LogIn, Mail, MonitorCog, Network, Palette, Plus, RefreshCw, Search, Send, Settings2, Timer, Upload, X,
+  BookOpen, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, CloudDownload, Database, FileText,
+  Archive, Award, BookOpenCheck, Command as CommandIcon, Folder, FolderOpen, GraduationCap, Inbox, Link2, LogIn, Mail, MonitorCog, Network, Palette, Plus, RefreshCw, Search, Send, Settings2, Star, Timer, Trophy, Upload, X,
 } from 'lucide-react'
 import { mergeBlackboardCourses } from './blackboard-import'
 import { mergeBlackboardMaterials } from './blackboard-material-import'
@@ -31,6 +31,10 @@ import { defaultRefinementSelection, eligibleRefinementDocuments, refinementStat
 import { recommendedVersionChanges } from './material-version-selection'
 import type { RefinementJob } from './electron'
 import { mergeEmailDigestQueue, shouldFlushDailyDigest, syncEmailEventsForMode, type SyncEmailMode } from './email-sync-policy'
+import { ACHIEVEMENTS, achievementProgress, backfillLearningEvents, definitionForAward, evaluateAchievements, mergeLearningEvents, type AchievementAward, type LearningEvent } from './achievements'
+import { buildLearningCalendarItems, buildMonthGrid, filterLearningCalendarItems, localDateKey, shiftMonth, type LearningCalendarKind } from './learning-calendar'
+import { planCelebrations, type Celebration, type CelebrationHistoryItem } from './achievement-celebration'
+import growthJourneyImage from './assets/growth-journey.png'
 
 type Section = 'overview' | 'inbox' | 'library' | 'assignments' | 'knowledge' | 'map' | 'review' | 'schedule' | 'focus' | 'growth' | 'settings'
 type ConceptRating = 0 | 1 | 2 | 3 | 4
@@ -41,7 +45,7 @@ type AiCapabilities = { provider: AiProvider; chat: boolean; files: boolean; res
 type AiConfiguration = { configured: boolean; provider: AiProvider; baseUrl: string; model: string; capabilities?: AiCapabilities }
 type AiProviderPreset = { id: AiProvider; label: string; baseUrl: string; description: string }
 type AutoSyncStatus = { state: 'idle' | 'scheduled' | 'syncing' | 'paused' | 'error'; lastAttempt?: string; lastSuccess?: string; nextAt?: string; message: string; consecutiveFailures: number }
-type StudyState = { courses: Course[]; materials: Material[]; assignments: Assignment[]; journal: JournalEntry[]; knowledgeRatings: Record<string, ConceptRating>; reviewSelections: Record<string, ReviewSelection>; reviewSessions: Record<string, ReviewSession>; reviewSchedule: ReviewScheduleEntry[]; dismissedReviewSuggestions: Record<string, string>; growthSnapshots: GrowthSnapshot[]; syncInbox: SyncInboxItem[] }
+type StudyState = { courses: Course[]; materials: Material[]; assignments: Assignment[]; journal: JournalEntry[]; knowledgeRatings: Record<string, ConceptRating>; reviewSelections: Record<string, ReviewSelection>; reviewSessions: Record<string, ReviewSession>; reviewSchedule: ReviewScheduleEntry[]; dismissedReviewSuggestions: Record<string, string>; growthSnapshots: GrowthSnapshot[]; syncInbox: SyncInboxItem[]; learningEvents: LearningEvent[]; achievementAwards: AchievementAward[]; achievementBackfillVersion: number }
 type TreeNode = { folders: Map<string, TreeNode>; entries: Material[] }
 type FileState = 'available' | 'missing'
 type KnowledgeLocation = { materialId: string; kind: 'pdf-page' | 'pptx-slide' | 'docx-section'; start: number; end?: number; confidence?: number; evidence?: string; method?: string; candidate?: boolean; manual?: boolean }
@@ -59,11 +63,12 @@ function refinementJobStatusLabel(status: RefinementJob['status']) {
 }
 
 const STORAGE_KEY = 'xuejing-study-hub-v3'
-const emptyStudy: StudyState = { courses: [], materials: [], assignments: [], journal: [], knowledgeRatings: {}, reviewSelections: {}, reviewSessions: {}, reviewSchedule: [], dismissedReviewSuggestions: {}, growthSnapshots: [], syncInbox: [] }
+const emptyStudy: StudyState = { courses: [], materials: [], assignments: [], journal: [], knowledgeRatings: {}, reviewSelections: {}, reviewSessions: {}, reviewSchedule: [], dismissedReviewSuggestions: {}, growthSnapshots: [], syncInbox: [], learningEvents: [], achievementAwards: [], achievementBackfillVersion: 0 }
 const courseColors = ['#336a58', '#bf6a48', '#6a5f9e', '#3d7890', '#8a6a3d', '#a35e79']
 const APP_PREFERENCES_KEY = 'xuejing-app-preferences-v1'
 const EMAIL_DIGEST_QUEUE_KEY = 'xuejing-email-digest-queue-v1'
 const EMAIL_DIGEST_LAST_SENT_KEY = 'xuejing-email-digest-last-sent-v1'
+const CELEBRATION_HISTORY_KEY = 'xuejing-celebration-history-v1'
 const SEARCH_COMMANDS: SearchCommand[] = [
   { id: 'nav-1', title: '打开学习总览', subtitle: '查看 DDL、今日复习队列和资料状态', keywords: '首页 总览', shortcut: 'Ctrl+1' },
   { id: 'nav-inbox', title: '打开学习收件箱', subtitle: '查看平台同步后新增和变化的信息', keywords: '收件箱 更新 变化 通知', shortcut: '' },
@@ -110,6 +115,15 @@ function loadEmailDigestQueue(): SyncInboxItem[] {
   }
 }
 
+function loadCelebrationHistory(): CelebrationHistoryItem[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(CELEBRATION_HISTORY_KEY) ?? '[]')
+    return Array.isArray(value) ? value.filter((item): item is CelebrationHistoryItem => Boolean(item && typeof item.displayedAt === 'string' && ['common', 'rare', 'milestone'].includes(item.tier))).slice(-100) : []
+  } catch {
+    return []
+  }
+}
+
 function loadStudy(): StudyState {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as Partial<StudyState>
@@ -141,6 +155,9 @@ function loadStudy(): StudyState {
       dismissedReviewSuggestions: stored.dismissedReviewSuggestions && typeof stored.dismissedReviewSuggestions === 'object' ? stored.dismissedReviewSuggestions as Record<string, string> : {},
       growthSnapshots: Array.isArray(stored.growthSnapshots) ? stored.growthSnapshots.filter((snapshot): snapshot is GrowthSnapshot => Boolean(snapshot && typeof snapshot.date === 'string' && Array.isArray(snapshot.courses))) : [],
       syncInbox: Array.isArray(stored.syncInbox) ? stored.syncInbox.filter((item): item is SyncInboxItem => Boolean(item && typeof item.id === 'string' && typeof item.kind === 'string' && typeof item.createdAt === 'string')) : [],
+      learningEvents: Array.isArray(stored.learningEvents) ? stored.learningEvents.filter((item): item is LearningEvent => Boolean(item && typeof item.id === 'string' && typeof item.type === 'string' && typeof item.occurredAt === 'string')).slice(-5000) : [],
+      achievementAwards: Array.isArray(stored.achievementAwards) ? stored.achievementAwards.filter((item): item is AchievementAward => Boolean(item && typeof item.id === 'string' && typeof item.achievementId === 'string' && typeof item.awardedAt === 'string')) : [],
+      achievementBackfillVersion: typeof stored.achievementBackfillVersion === 'number' ? stored.achievementBackfillVersion : 0,
     }
   } catch {
     return emptyStudy
@@ -417,6 +434,18 @@ export default function App() {
   const [growthRange, setGrowthRange] = useState<7 | 30>(7)
   const [growthCourseFilter, setGrowthCourseFilter] = useState('all')
   const [showAllGrowthCourses, setShowAllGrowthCourses] = useState(false)
+  const [achievementCategory, setAchievementCategory] = useState<'all' | typeof ACHIEVEMENTS[number]['category']>('all')
+  const [achievementView, setAchievementView] = useState<'all' | 'earned' | 'progress'>('all')
+  const [showAllAchievements, setShowAllAchievements] = useState(false)
+  const [achievementBackfillNotice, setAchievementBackfillNotice] = useState(0)
+  const [celebrationQueue, setCelebrationQueue] = useState<Celebration[]>([])
+  const [activeCelebration, setActiveCelebration] = useState<Celebration | null>(null)
+  const celebrationHistoryRef = useRef<CelebrationHistoryItem[]>(loadCelebrationHistory())
+  const celebratedAwardIdsRef = useRef<Set<string>>(new Set(study.achievementAwards.map((award) => award.id)))
+  const [learningMonth, setLearningMonth] = useState(() => localDateKey(new Date()).slice(0, 7) + '-01')
+  const [learningDay, setLearningDay] = useState(() => localDateKey(new Date()))
+  const [learningCalendarKind, setLearningCalendarKind] = useState<LearningCalendarKind | 'all'>('all')
+  const [learningCalendarCourse, setLearningCalendarCourse] = useState('all')
   const [calendarAnchor, setCalendarAnchor] = useState(() => calendarDateKey(new Date()))
   const [calendarSelection, setCalendarSelection] = useState<string[]>([])
   const [calendarBatchDate, setCalendarBatchDate] = useState('')
@@ -446,6 +475,72 @@ export default function App() {
     studyRef.current = study
   }, [study])
 
+  const recordLearningEvent = useCallback((learningEvent: LearningEvent) => {
+    setStudy((current) => {
+      const learningEvents = mergeLearningEvents(current.learningEvents, [learningEvent])
+      return learningEvents.length === current.learningEvents.length && learningEvents.every((item, index) => item === current.learningEvents[index]) ? current : { ...current, learningEvents }
+    })
+  }, [])
+
+  const achievementContext = useMemo(() => ({
+    events: study.learningEvents,
+    courses: study.courses,
+    materials: study.materials,
+    assignments: study.assignments,
+    journal: study.journal,
+    reviewSessions: study.reviewSessions,
+    knowledgeRatings: study.knowledgeRatings,
+  }), [study.assignments, study.courses, study.journal, study.knowledgeRatings, study.learningEvents, study.materials, study.reviewSessions])
+
+  useEffect(() => {
+    if (study.achievementBackfillVersion >= 1) return
+    const historicalEvents = backfillLearningEvents({ courses: study.courses, materials: study.materials, assignments: study.assignments, journal: study.journal, reviewSessions: study.reviewSessions, knowledgeRatings: study.knowledgeRatings })
+    const learningEvents = mergeLearningEvents(study.learningEvents, historicalEvents)
+    const context = { ...achievementContext, events: learningEvents }
+    const awards = evaluateAchievements(context, study.achievementAwards, new Date().toISOString(), true)
+    setStudy((current) => ({ ...current, learningEvents: mergeLearningEvents(current.learningEvents, historicalEvents), achievementAwards: [...current.achievementAwards, ...awards], achievementBackfillVersion: 1 }))
+    if (awards.length) setAchievementBackfillNotice(awards.length)
+  }, [achievementContext, study.achievementAwards, study.achievementBackfillVersion, study.assignments, study.courses, study.journal, study.knowledgeRatings, study.learningEvents, study.materials, study.reviewSessions])
+
+  useEffect(() => {
+    if (study.achievementBackfillVersion < 1) return
+    const awards = evaluateAchievements(achievementContext, study.achievementAwards)
+    if (!awards.length) return
+    setStudy((current) => ({ ...current, achievementAwards: [...current.achievementAwards, ...awards.filter((award) => !current.achievementAwards.some((item) => item.achievementId === award.achievementId))] }))
+  }, [achievementContext, study.achievementAwards, study.achievementBackfillVersion])
+
+  const anyReviewActive = Object.values(study.reviewSessions).some((session) => session.active)
+  useEffect(() => {
+    const unseen = study.achievementAwards.filter((award) => !celebratedAwardIdsRef.current.has(award.id))
+    if (!unseen.length) return
+    unseen.forEach((award) => celebratedAwardIdsRef.current.add(award.id))
+    const planned = planCelebrations(unseen, celebrationHistoryRef.current, new Date().toISOString(), appPreferences.celebrationMode, anyReviewActive)
+    if (planned.length) setCelebrationQueue((current) => [...current, ...planned])
+  }, [anyReviewActive, appPreferences.celebrationMode, study.achievementAwards])
+
+  useEffect(() => {
+    if (anyReviewActive) return
+    setCelebrationQueue((current) => current.map((item) => item.delayed ? { ...item, delayed: false } : item))
+  }, [anyReviewActive])
+
+  useEffect(() => {
+    if (activeCelebration || !celebrationQueue.length) return
+    const index = celebrationQueue.findIndex((item) => !item.delayed)
+    if (index < 0) return
+    const next = celebrationQueue[index]
+    setCelebrationQueue((current) => current.filter((_, itemIndex) => itemIndex !== index))
+    setActiveCelebration(next)
+    const displayedAt = new Date().toISOString()
+    celebrationHistoryRef.current = [...celebrationHistoryRef.current, { displayedAt, tier: next.tier }].slice(-100)
+    localStorage.setItem(CELEBRATION_HISTORY_KEY, JSON.stringify(celebrationHistoryRef.current))
+  }, [activeCelebration, celebrationQueue])
+
+  useEffect(() => {
+    if (!activeCelebration) return
+    const timeout = window.setTimeout(() => setActiveCelebration(null), activeCelebration.tier === 'milestone' ? 6500 : 4200)
+    return () => window.clearTimeout(timeout)
+  }, [activeCelebration])
+
   useEffect(() => {
     if (showEmailSettings) return
     setEmailPassword('')
@@ -462,6 +557,8 @@ export default function App() {
   const [importKnowledgeRole, setImportKnowledgeRole] = useState<'courseware' | 'reference'>('courseware')
   const [journalText, setJournalText] = useState('')
   const [journalMood, setJournalMood] = useState<JournalEntry['mood']>('平稳')
+  const [journalDate, setJournalDate] = useState(() => localDateKey(new Date()))
+  const [editingJournalId, setEditingJournalId] = useState<string | null>(null)
   const [assignmentCourseFilter, setAssignmentCourseFilter] = useState('all')
   const [showCompletedAssignments, setShowCompletedAssignments] = useState(false)
   const [showManualAssignment, setShowManualAssignment] = useState(false)
@@ -614,6 +711,8 @@ export default function App() {
     try {
       const result = await window.xuejing.knowledge.build({ documents: knowledgeDocuments })
       setKnowledgeIndex(result)
+      const occurredAt = new Date().toISOString()
+      recordLearningEvent({ id: `knowledge-build:${occurredAt}`, type: 'knowledge_build', occurredAt, value: 1, title: `解析 ${result.stats.parsed} 份资料` })
       showToast(`知识库已更新：解析 ${result.stats.parsed} 份资料，生成 ${result.stats.concepts} 个知识条目。`)
     } catch (error) {
       showToast(messageOf(error))
@@ -752,6 +851,8 @@ export default function App() {
     try {
       const result = await api.refine({ documents: knowledgeDocuments, materialId, force })
       setKnowledgeIndex(result)
+      const occurredAt = new Date().toISOString()
+      recordLearningEvent({ id: `ai-refine:${materialId}:${occurredAt}`, type: 'ai_refine', occurredAt, materialId, value: 1, title: '完成 AI 精炼' })
       showToast('AI 精炼完成：课程知识点已根据该资料更新。')
     } catch (error) {
       showToast(messageOf(error))
@@ -1010,13 +1111,17 @@ export default function App() {
         const nextPhase = focusPhase === 'focus' ? 'break' : 'focus'
         setFocusRunning(false)
         setFocusPhase(nextPhase)
+        if (focusPhase === 'focus') {
+          const occurredAt = new Date().toISOString()
+          recordLearningEvent({ id: `focus:${occurredAt}`, type: 'focus_completed', occurredAt, value: appPreferences.focusMinutes, title: `${appPreferences.focusMinutes} 分钟专注` })
+        }
         void window.xuejing?.deadlines.notify({ title: focusPhase === 'focus' ? '专注完成' : '休息完成', body: focusPhase === 'focus' ? `休息 ${appPreferences.breakMinutes} 分钟，再开始下一轮专注。` : `开始下一轮 ${appPreferences.focusMinutes} 分钟专注。` })
         return (nextPhase === 'focus' ? appPreferences.focusMinutes : appPreferences.breakMinutes) * 60
       }
       return current - 1
     }), 1000)
     return () => window.clearInterval(timer)
-  }, [appPreferences.breakMinutes, appPreferences.focusMinutes, focusPhase, focusRunning])
+  }, [appPreferences.breakMinutes, appPreferences.focusMinutes, focusPhase, focusRunning, recordLearningEvent])
 
   useEffect(() => { void verifyCachedFiles() }, [verifyCachedFiles])
   useEffect(() => { void reconcileBlackboardCache() }, [reconcileBlackboardCache])
@@ -1146,7 +1251,8 @@ export default function App() {
         .filter((material): material is typeof material & { url: string } => material.kind === 'assignment' && Boolean(material.url))
         .map((material) => ({ courseName: material.courseName, title: material.title, url: material.url, meta: material.meta, dueAt: material.dueAt, status: material.status, score: material.score, maxScore: material.maxScore })))
       const changes = detectSyncChanges(snapshot, { courses: courseMerge.courses, materials: materialMerge.materials, assignments: assignmentMerge.assignments }, 'Blackboard')
-      const nextStudy = { ...snapshot, courses: courseMerge.courses, materials: materialMerge.materials, assignments: assignmentMerge.assignments, syncInbox: mergeSyncInbox(snapshot.syncInbox, changes) }
+      const syncedAt = new Date().toISOString()
+      const nextStudy: StudyState = { ...snapshot, courses: courseMerge.courses, materials: materialMerge.materials, assignments: assignmentMerge.assignments, syncInbox: mergeSyncInbox(snapshot.syncInbox, changes), learningEvents: mergeLearningEvents(snapshot.learningEvents, [{ id: `sync:Blackboard:${syncedAt}`, type: 'platform_sync', occurredAt: syncedAt, title: '同步 Blackboard' }]) }
       studyRef.current = nextStudy
       setStudy(nextStudy)
       notifySyncChangesByEmail(changes)
@@ -1209,7 +1315,8 @@ export default function App() {
       const courseMerge = mergeGradescopeCourses(snapshot.courses, result.courses)
       const assignmentMerge = mergeGradescopeAssignments(snapshot.assignments, courseMerge.courses, result.assignments)
       const changes = detectSyncChanges(snapshot, { courses: courseMerge.courses, materials: snapshot.materials, assignments: assignmentMerge.assignments }, 'Gradescope')
-      const nextStudy = { ...snapshot, courses: courseMerge.courses, assignments: assignmentMerge.assignments, syncInbox: mergeSyncInbox(snapshot.syncInbox, changes) }
+      const syncedAt = new Date().toISOString()
+      const nextStudy: StudyState = { ...snapshot, courses: courseMerge.courses, assignments: assignmentMerge.assignments, syncInbox: mergeSyncInbox(snapshot.syncInbox, changes), learningEvents: mergeLearningEvents(snapshot.learningEvents, [{ id: `sync:Gradescope:${syncedAt}`, type: 'platform_sync', occurredAt: syncedAt, title: '同步 Gradescope' }]) }
       studyRef.current = nextStudy
       setStudy(nextStudy)
       notifySyncChangesByEmail(changes)
@@ -1348,6 +1455,12 @@ export default function App() {
     if (!refinementJobs[0]) return
     void refreshKnowledgeStatus()
   }, [refinementJobs[0]?.completedIds.length, refinementJobs[0]?.status, refreshKnowledgeStatus])
+
+  useEffect(() => {
+    const completed = refinementJobs.flatMap((job) => job.completedIds.map((materialId) => ({ id: `ai-refine-job:${job.id}:${materialId}`, type: 'ai_refine' as const, occurredAt: job.updatedAt || new Date().toISOString(), courseId: job.courseId, materialId, value: 1, title: '后台 AI 精炼完成' })))
+    if (!completed.length) return
+    setStudy((current) => ({ ...current, learningEvents: mergeLearningEvents(current.learningEvents, completed) }))
+  }, [refinementJobs])
 
   const connectBlackboard = async () => {
     const api = window.xuejing?.blackboard
@@ -1493,6 +1606,7 @@ export default function App() {
         sources: ['手动添加' as const],
       }
       setStudy((current) => {
+        const importedAt = new Date().toISOString()
         const materials: Material[] = result.items.map((item) => ({
           id: item.id, courseId: course.id, title: item.title, type: item.type, source: '手动添加', meta: item.meta,
           concepts: [], localPath: item.localPath, path: item.path, folder: item.path.at(-1), kind: 'file', knowledgeRole: importKnowledgeRole,
@@ -1502,6 +1616,7 @@ export default function App() {
           ...current,
           courses: existing ? current.courses : [...current.courses, course],
           materials: [...current.materials.filter((item) => !incomingIds.has(item.id)), ...materials],
+          learningEvents: result.items.length ? mergeLearningEvents(current.learningEvents, [{ id: `material-import:${course.id}:${importedAt}`, type: 'material_import', occurredAt: importedAt, courseId: course.id, value: 1, title: `导入 ${result.items.length} 份资料` }]) : current.learningEvents,
         }
       })
       setVaultRoot(result.vaultRoot ?? vaultRoot)
@@ -1515,11 +1630,38 @@ export default function App() {
 
   const saveJournal = () => {
     const content = journalText.trim()
-    if (!content) return showToast('先写下一点今天的收获或困难。')
-    const today = new Date().toISOString().slice(0, 10)
-    setStudy((current) => ({ ...current, journal: [{ id: `journal-${Date.now()}`, date: today, content, mood: journalMood }, ...current.journal] }))
+    if (!content) return showToast('先写下一点这一天的收获或困难。')
+    const now = new Date().toISOString()
+    const id = editingJournalId ?? `journal-${Date.now()}`
+    setStudy((current) => {
+      const entry: JournalEntry = { id, date: journalDate, content, mood: journalMood, updatedAt: now }
+      const journal = editingJournalId ? current.journal.map((item) => item.id === editingJournalId ? entry : item) : [entry, ...current.journal]
+      return { ...current, journal, learningEvents: mergeLearningEvents(current.learningEvents, [{ id: `journal:${id}`, type: 'journal_saved', occurredAt: now, title: content.slice(0, 40) }]) }
+    })
     setJournalText('')
-    showToast('今天的学习记录已保存。')
+    setEditingJournalId(null)
+    showToast(editingJournalId ? '学习记录已更新。' : `${journalDate} 的学习记录已保存。`)
+  }
+
+  const editJournal = (entry: JournalEntry) => {
+    setLearningDay(entry.date)
+    setJournalDate(entry.date)
+    setJournalText(entry.content)
+    setJournalMood(entry.mood)
+    setEditingJournalId(entry.id)
+  }
+
+  const cancelJournalEdit = () => {
+    setJournalText('')
+    setJournalMood('平稳')
+    setEditingJournalId(null)
+  }
+
+  const deleteJournal = (entry: JournalEntry) => {
+    if (!window.confirm(`删除 ${entry.date} 的这条学习记录？`)) return
+    setStudy((current) => ({ ...current, journal: current.journal.filter((item) => item.id !== entry.id) }))
+    if (editingJournalId === entry.id) cancelJournalEdit()
+    showToast('学习记录已删除。')
   }
 
   const selectedCourse = study.courses.find((course) => course.id === selectedCourseId) ?? null
@@ -1689,6 +1831,18 @@ export default function App() {
   const growthSnapshotCourseName = growthCourseFilter === 'all' ? '全部课程' : growthCourseMetrics.find((course) => course.courseId === growthCourseFilter)?.courseName ?? '所选课程'
   const visibleGrowthCourseMetrics = visibleCourseMetrics(growthCourseMetrics, showAllGrowthCourses)
   const growthSnapshotDelta = (key: 'weakMaterials' | 'weakConcepts' | 'verifiedConcepts' | 'conflicts') => latestGrowthSnapshot && previousGrowthSnapshot ? latestGrowthSnapshot[key] - previousGrowthSnapshot[key] : null
+  const achievementItems = useMemo(() => achievementProgress(achievementContext, study.achievementAwards), [achievementContext, study.achievementAwards])
+  const earnedAchievementCount = achievementItems.filter((item) => item.awarded).length
+  const visibleAchievementItems = useMemo(() => {
+    const filtered = achievementItems.filter((item) => (achievementCategory === 'all' || item.definition.category === achievementCategory) && (achievementView === 'all' || (achievementView === 'earned' ? item.awarded : !item.awarded)))
+      .sort((left, right) => Number(Boolean(right.awarded)) - Number(Boolean(left.awarded)) || (right.awarded?.awardedAt ?? '').localeCompare(left.awarded?.awardedAt ?? '') || right.percent - left.percent)
+    return showAllAchievements ? filtered : filtered.slice(0, 12)
+  }, [achievementCategory, achievementItems, achievementView, showAllAchievements])
+  const learningCalendarItems = useMemo(() => buildLearningCalendarItems({ events: study.learningEvents, journal: study.journal, awards: study.achievementAwards, assignments: study.assignments }), [study.achievementAwards, study.assignments, study.journal, study.learningEvents])
+  const filteredLearningCalendarItems = useMemo(() => filterLearningCalendarItems(learningCalendarItems, learningCalendarKind, learningCalendarCourse), [learningCalendarCourse, learningCalendarItems, learningCalendarKind])
+  const learningMonthGrid = useMemo(() => buildMonthGrid(learningMonth, filteredLearningCalendarItems, deadlineNow), [deadlineNow, filteredLearningCalendarItems, learningMonth])
+  const selectedLearningItems = filteredLearningCalendarItems.filter((item) => item.date === learningDay)
+  const selectedJournalEntries = study.journal.filter((entry) => entry.date === learningDay)
 
   useEffect(() => {
     if (!growthCourseMetrics.length) return
@@ -1748,18 +1902,31 @@ export default function App() {
     if (!activeReviewCourseId) return
     setStudy((current) => {
       const reviewSessions = { ...current.reviewSessions }
+      const previous = reviewSessions[activeReviewCourseId]
+      const events: LearningEvent[] = []
       if (next) reviewSessions[activeReviewCourseId] = next
       else delete reviewSessions[activeReviewCourseId]
-      return { ...current, reviewSessions }
+      if (next && (!previous || previous.startedAt !== next.startedAt)) events.push({ id: `review-start:${activeReviewCourseId}:${next.startedAt}`, type: 'review_started', occurredAt: next.startedAt, courseId: activeReviewCourseId, sessionId: next.startedAt, title: '开始复习会话' })
+      if (next && previous?.active && !next.active) {
+        const occurredAt = new Date().toISOString()
+        const minutes = Math.max(1, Math.round((new Date(occurredAt).getTime() - new Date(next.startedAt).getTime()) / 60_000))
+        events.push({ id: `review-complete:${activeReviewCourseId}:${next.startedAt}`, type: 'review_completed', occurredAt, courseId: activeReviewCourseId, sessionId: next.startedAt, value: minutes, title: `完成 ${minutes} 分钟复习` })
+      }
+      const previousAssessments = new Set((previous?.materialReviewHistory ?? []).map((record) => `${record.materialId}:${record.assessedAt}`))
+      for (const record of next?.materialReviewHistory ?? []) if (!previousAssessments.has(`${record.materialId}:${record.assessedAt}`)) events.push({ id: `material-confirm:${activeReviewCourseId}:${record.materialId}:${record.assessedAt}`, type: 'material_confirmed', occurredAt: record.assessedAt, courseId: activeReviewCourseId, materialId: record.materialId, value: 1, title: '完成资料掌握确认' })
+      const previousTests = new Set((previous?.quickTests ?? []).filter((test) => test.status === 'completed').map((test) => test.id))
+      for (const test of next?.quickTests ?? []) if (test.status === 'completed' && !previousTests.has(test.id)) events.push({ id: `quick-test:${test.id}`, type: 'quick_test_completed', occurredAt: new Date().toISOString(), courseId: activeReviewCourseId, sessionId: next?.startedAt, score: test.score, value: 1, title: `快速测试 ${test.score}%` })
+      return { ...current, reviewSessions, learningEvents: mergeLearningEvents(current.learningEvents, events) }
     })
   }
   const setReviewScheduleDate = (item: ReviewQueueItem | ReviewScheduleEntry, scheduledDate: string) => {
     setStudy((current) => {
       const id = reviewTargetKey(item)
       const remaining = current.reviewSchedule.filter((entry) => entry.id !== id)
-      if (!scheduledDate) return { ...current, reviewSchedule: remaining }
+      const occurredAt = new Date().toISOString()
+      if (!scheduledDate) return { ...current, reviewSchedule: remaining, learningEvents: mergeLearningEvents(current.learningEvents, [{ id: `schedule:${id}:${occurredAt}`, type: 'schedule_adjusted', occurredAt, courseId: item.courseId, title: '移除复习日程' }]) }
       const queueItem: ReviewQueueItem = { ...item, id, reason: '手动安排', priority: 0 }
-      return { ...current, reviewSchedule: [...remaining, createReviewScheduleEntry(queueItem, scheduledDate)] }
+      return { ...current, reviewSchedule: [...remaining, createReviewScheduleEntry(queueItem, scheduledDate)], learningEvents: mergeLearningEvents(current.learningEvents, [{ id: `schedule:${id}:${occurredAt}`, type: 'schedule_adjusted', occurredAt, courseId: item.courseId, title: `调整复习日程至 ${scheduledDate}` }]) }
     })
   }
   const updateCalendarDates = (updates: Record<string, string>) => {
@@ -1830,11 +1997,12 @@ export default function App() {
     if (!courseCompletionId) return
     const course = study.courses.find((item) => item.id === courseCompletionId)
     setStudy((current) => {
+      const occurredAt = new Date().toISOString()
       const result = completeCourse(current.courses, current.reviewSchedule, current.reviewSessions, courseCompletionId, {
         removeFutureManualSchedule: removeCourseManualSchedule,
         today: reviewToday,
       })
-      return { ...current, ...result }
+      return { ...current, ...result, learningEvents: mergeLearningEvents(current.learningEvents, [{ id: `course-complete:${courseCompletionId}:${occurredAt}`, type: 'course_completed', occurredAt, courseId: courseCompletionId, title: course?.name ?? '课程结课' }]) }
     })
     setCourseCompletionId(null)
     setRemoveCourseManualSchedule(false)
@@ -2151,9 +2319,11 @@ export default function App() {
   const saveAssignmentKnowledge = (ids = assignmentKnowledgeDraft) => {
     if (!analyzedAssignment) return
     const validIds = [...new Set(ids)].filter((id) => assignmentCourseConcepts.some((concept) => concept.id === id))
+    const occurredAt = new Date().toISOString()
     setStudy((current) => ({
       ...current,
       assignments: current.assignments.map((assignment) => assignment.id === analyzedAssignment.id ? { ...assignment, manualKnowledgeIds: validIds.length ? validIds : undefined } : assignment),
+      learningEvents: validIds.length ? mergeLearningEvents(current.learningEvents, [{ id: `assignment-analysis:${analyzedAssignment.id}:${occurredAt}`, type: 'assignment_analyzed', occurredAt, assignmentId: analyzedAssignment.id, courseId: analyzedAssignment.courseId, title: analyzedAssignment.title }]) : current.learningEvents,
     }))
     showToast(validIds.length ? `已保存 ${validIds.length} 个作业前置知识点；后续同步会保留。` : '已清除手动映射，将恢复自动建议。')
   }
@@ -2183,12 +2353,15 @@ export default function App() {
   }
 
   const toggleAssignmentCompletion = (assignment: Assignment) => {
+    const occurredAt = new Date().toISOString()
+    const markingCompleted = assignment.manualStatus !== 'completed'
     setStudy((current) => ({
       ...current,
       assignments: current.assignments.map((item) => item.id !== assignment.id ? item : {
         ...item,
         manualStatus: item.manualStatus === 'completed' ? undefined : 'completed',
       }),
+      learningEvents: markingCompleted ? mergeLearningEvents(current.learningEvents, [{ id: `assignment-complete:${assignment.id}`, type: 'assignment_completed', occurredAt, assignmentId: assignment.id, courseId: assignment.courseId, title: assignment.title }]) : current.learningEvents,
     }))
     showToast(assignment.manualStatus === 'completed' ? '已恢复为待处理作业。' : '已标记为手动完成；下次同步仍会保留该标记。')
   }
@@ -2425,7 +2598,7 @@ export default function App() {
           </section>}
 
           {section === 'library' && <section>
-            <div className="page-heading"><div><span className="eyebrow">课程资料</span><h1>保持 Blackboard 的原始目录结构。</h1><p>这里仅收纳 Blackboard 与手动导入的课程资料；Gradescope 作业会在独立的“作业中心”按学期展示。自动缓存开启时，每次同步都会将新发现的 Blackboard 文件下载到本地资料库。</p></div><div className="library-actions"><button className={`outline-button ${autoCacheEnabled ? 'enabled-toggle' : ''}`} onClick={() => setAutoCacheEnabled((enabled) => !enabled)}><CloudDownload size={14} />自动缓存：{autoCacheEnabled ? '开' : '关'}</button><button className="outline-button" disabled={!selectedCourse || busyKey === 'cache-course'} onClick={cacheCurrentCourse}><CloudDownload size={14} />{busyKey === 'cache-course' ? '缓存中…' : '一键缓存本课程'}</button><button className="outline-button" onClick={syncBlackboard}><RefreshCw size={14} />同步</button><button className="primary-button" onClick={() => setShowImport(true)}><Plus size={15} />手动添加</button></div></div>
+            <div className="page-heading action-heading"><div><span className="eyebrow">课程资料</span><h1>保持 Blackboard 的原始目录结构。</h1><p>这里仅收纳 Blackboard 与手动导入的课程资料；Gradescope 作业会在独立的“作业中心”按学期展示。自动缓存开启时，每次同步都会将新发现的 Blackboard 文件下载到本地资料库。</p></div><div className="library-actions"><button className={`outline-button ${autoCacheEnabled ? 'enabled-toggle' : ''}`} onClick={() => setAutoCacheEnabled((enabled) => !enabled)}><CloudDownload size={14} />自动缓存：{autoCacheEnabled ? '开' : '关'}</button><button className="outline-button" disabled={!selectedCourse || busyKey === 'cache-course'} onClick={cacheCurrentCourse}><CloudDownload size={14} />{busyKey === 'cache-course' ? '缓存中…' : '一键缓存本课程'}</button><button className="outline-button" onClick={syncBlackboard}><RefreshCw size={14} />同步</button><button className="primary-button" onClick={() => setShowImport(true)}><Plus size={15} />手动添加</button></div></div>
             <div className="vault-path" title={vaultRoot}>资料库：{vaultRoot}<button className="vault-repair" onClick={() => repairCachedExtensions()}>修复已缓存文件</button></div>
             {!study.courses.length ? <div className="empty-library"><BookOpen size={31} /><strong>还没有真实课程</strong><span>连接 Blackboard 同步，或手动导入一门课程的资料。</span><div><button className="primary-button" onClick={connectBlackboard}>连接 Blackboard</button><button className="outline-button inline-gap" onClick={() => setShowImport(true)}>导入本地资料</button></div></div> : <div className="library-explorer">
               <aside className="course-browser"><div className="browser-heading"><span>课程</span><small>{study.courses.length} 门</small></div>{study.courses.map((course) => <button className={selectedCourse?.id === course.id ? 'selected' : ''} onClick={() => setSelectedCourseId(course.id)} key={course.id}><i style={{ background: course.color }} /><span>{course.name}</span><small>{libraryMaterials.filter((material) => material.courseId === course.id).length}</small></button>)}</aside>
@@ -2449,7 +2622,7 @@ export default function App() {
           </section>}
 
           {section === "knowledge" && <section>
-            <div className="page-heading"><div><span className="eyebrow">本地知识库</span><h1>本地构建资料索引，AI 自动选择合适的精炼方式。</h1><p>支持原件输入的 API 会直接分析课件；DeepSeek、Gemini 或仅支持对话的兼容接口会使用本地分页解析。教材与参考书只作本地阅读和搜索来源。</p></div><div className="knowledge-actions"><select className="knowledge-course-filter" value={activeKnowledgeCourseId ?? 'all'} onChange={(event) => chooseCourseFilter(event.target.value, setKnowledgeCourseFilter)}><option value="all">全部课程</option>{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select><button className="outline-button" disabled={busyKey === "refine-job-start" || (!activeRefinementJob && (!aiConfig.configured || !activeKnowledgeCourseId))} onClick={openBatchCloudRefinement}>{busyKey === "refine-job-start" ? "创建任务中…" : activeRefinementJob ? "查看 AI 任务" : "批量 AI 精炼"}</button><button className="outline-button" disabled={busyKey === "ocr-batch" || !visibleKnowledgeDocuments.some((document) => document.status === "image")} onClick={runBatchOcr}>{busyKey === "ocr-batch" ? "批量 OCR 中…" : "批量 OCR"}</button><button className="primary-button" disabled={busyKey === "knowledge-build" || busyKey === 'version-switch'} onClick={buildKnowledgeBase}><Network size={15} />{busyKey === "knowledge-build" ? "构建中…" : "本地构建 / 更新"}</button><button className="outline-button" onClick={() => setShowAiSettings(true)}>AI 设置</button></div></div>
+            <div className="page-heading action-heading"><div><span className="eyebrow">本地知识库</span><h1>本地构建资料索引，AI 自动选择合适的精炼方式。</h1><p>支持原件输入的 API 会直接分析课件；DeepSeek、Gemini 或仅支持对话的兼容接口会使用本地分页解析。教材与参考书只作本地阅读和搜索来源。</p></div><div className="knowledge-actions"><select className="knowledge-course-filter" value={activeKnowledgeCourseId ?? 'all'} onChange={(event) => chooseCourseFilter(event.target.value, setKnowledgeCourseFilter)}><option value="all">全部课程</option>{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select><button className="outline-button" disabled={busyKey === "refine-job-start" || (!activeRefinementJob && (!aiConfig.configured || !activeKnowledgeCourseId))} onClick={openBatchCloudRefinement}>{busyKey === "refine-job-start" ? "创建任务中…" : activeRefinementJob ? "查看 AI 任务" : "批量 AI 精炼"}</button><button className="outline-button" disabled={busyKey === "ocr-batch" || !visibleKnowledgeDocuments.some((document) => document.status === "image")} onClick={runBatchOcr}>{busyKey === "ocr-batch" ? "批量 OCR 中…" : "批量 OCR"}</button><button className="primary-button" disabled={busyKey === "knowledge-build" || busyKey === 'version-switch'} onClick={buildKnowledgeBase}><Network size={15} />{busyKey === "knowledge-build" ? "构建中…" : "本地构建 / 更新"}</button><button className="outline-button" onClick={() => setShowAiSettings(true)}>AI 设置</button></div></div>
             <div className="growth-stats"><div><span>本地资料</span><strong>{knowledgeDocuments.length}</strong><small>已缓存或手动导入</small></div><div><span>已解析</span><strong>{knowledgeIndex?.stats.parsed ?? 0}</strong><small>{knowledgeIndex?.stats.unsupported ? (knowledgeIndex.stats.unsupported + " 份暂不支持") : "PDF、PPT/PPTX、DOCX、LaTeX 本地提取"}</small></div><div><span>课程知识点</span><strong>{knowledgeIndex?.stats.concepts ?? 0}</strong><small>{knowledgeIndex?.stats.reference ? (knowledgeIndex.stats.reference + " 份教材/参考资料未计入") : "仅由课件生成"}</small></div></div>
             {materialVersionCatalog.duplicates.some((group) => group.safeCleanupPaths.length) ? <div className="panel duplicate-file-notice"><div><strong>发现完全重复的历史孤立副本</strong><span>{materialVersionCatalog.duplicates.reduce((total, group) => total + group.safeCleanupPaths.length, 0)} 个文件内容与已保留资料完全相同，并且没有被课程资料或资料库清单引用。</span></div><button className="outline-button" disabled={busyKey === 'duplicate-cleanup'} onClick={cleanupDuplicateFiles}>{busyKey === 'duplicate-cleanup' ? '清理中…' : '检查并清理'}</button></div> : null}
             {knowledgeProgress && Boolean(['knowledge-build', 'ocr-batch', 'refine-batch', 'version-switch'].includes(busyKey ?? '') || busyKey?.startsWith('ocr:') || busyKey?.startsWith('refine:')) ? <div className="knowledge-progress"><span>{busyKey === 'refine-batch' || busyKey?.startsWith('refine:') ? `AI 精炼 ${knowledgeProgress.completed}/${knowledgeProgress.total}` : `正在处理 ${knowledgeProgress.completed}/${knowledgeProgress.total}`}</span><strong>{knowledgeProgress.title || "正在整理知识索引…"}</strong></div> : null}
@@ -2520,11 +2693,31 @@ export default function App() {
               </> : <div className="panel growth-empty"><Database size={25} /><div><strong>还没有可以统计的课程证据</strong><span>先构建知识库，并在期末复习中打开资料、完成掌握确认或快速测试。</span></div><button className="outline-button" onClick={() => setSection('knowledge')}>打开知识库</button></div>}
             </div>
 
+            <div className="panel achievement-gallery">
+              <div className="achievement-gallery-head"><div><span className="eyebrow">成长图鉴</span><h2>每一步都有证据，不靠空泛打卡。</h2><p>共 {ACHIEVEMENTS.length} 项：60 项可收集成长与 12 项高价值里程碑。已解锁 {earnedAchievementCount} 项。</p></div><img className="achievement-journey-art" src={growthJourneyImage} alt="从资料、知识网络走向成长的学习路径" /><div className="achievement-total"><Trophy size={25} /><strong>{earnedAchievementCount}/{ACHIEVEMENTS.length}</strong><span>{Math.round(earnedAchievementCount / ACHIEVEMENTS.length * 100)}%</span></div></div>
+              {achievementBackfillNotice ? <div className="achievement-backfill"><Star size={17} /><div><strong>已有成长回顾</strong><span>根据现有复习、测试、作业和日记记录补发了 {achievementBackfillNotice} 项成就；历史结果不会逐条弹窗。</span></div><button onClick={() => setAchievementBackfillNotice(0)}>知道了</button></div> : null}
+              <div className="achievement-filters"><div><button className={achievementView === 'all' ? 'active' : ''} onClick={() => setAchievementView('all')}>全部</button><button className={achievementView === 'earned' ? 'active' : ''} onClick={() => setAchievementView('earned')}>已获得</button><button className={achievementView === 'progress' ? 'active' : ''} onClick={() => setAchievementView('progress')}>进行中</button></div><select value={achievementCategory} onChange={(event) => setAchievementCategory(event.target.value as typeof achievementCategory)}><option value="all">全部分类</option>{(['起步', '资料', '复习', '测试', '专注', '作业', '记录', '成长'] as const).map((category) => <option key={category} value={category}>{category}</option>)}</select></div>
+              <div className="achievement-grid">{visibleAchievementItems.map((item) => <article className={`${item.definition.tier} ${item.awarded ? 'earned' : 'locked'}`} key={item.definition.id} title={item.awarded?.evidenceSummary ?? `${item.current}/${item.target}`}><div className="achievement-icon">{item.definition.tier === 'milestone' ? <Trophy size={20} /> : item.definition.tier === 'rare' ? <Star size={20} /> : <Award size={20} />}</div><div className="achievement-card-body"><span>{item.definition.category} · {item.definition.tier === 'milestone' ? '里程碑' : item.definition.tier === 'rare' ? '稀有' : '普通'}</span><strong>{item.definition.title}</strong><p>{item.definition.description}</p><i><b style={{ width: `${item.percent}%` }} /></i><small>{item.awarded ? `${item.awarded.backfilled ? '历史补发' : '获得于'} ${new Date(item.awarded.awardedAt).toLocaleDateString()}` : `${item.current}/${item.target}`}</small></div></article>)}</div>
+              {achievementItems.filter((item) => (achievementCategory === 'all' || item.definition.category === achievementCategory) && (achievementView === 'all' || (achievementView === 'earned' ? item.awarded : !item.awarded))).length > 12 ? <button className="growth-course-expand" onClick={() => setShowAllAchievements((current) => !current)}>{showAllAchievements ? '收起图鉴' : '展开全部成就'}<ChevronDown size={14} className={showAllAchievements ? 'expanded' : ''} /></button> : null}
+              <div className="milestone-timeline"><div className="panel-title"><div><Trophy size={17} /><h3>高价值里程碑</h3></div><span>长期积累，不因中断清零</span></div><div>{achievementItems.filter((item) => item.definition.tier === 'milestone').map((item) => <article className={item.awarded ? 'earned' : ''} key={item.definition.id}><i>{item.awarded ? '★' : '○'}</i><span><strong>{item.definition.title}</strong><small>{item.awarded ? item.awarded.evidenceSummary : `${item.current}/${item.target}`}</small></span></article>)}</div></div>
+            </div>
+
+            <div className="learning-calendar-layout">
+              <section className="panel learning-calendar-panel">
+                <div className="learning-calendar-head"><div><span className="eyebrow">月度学习日历</span><h2>{new Date(`${learningMonth}T12:00:00`).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' })}</h2></div><div><button onClick={() => setLearningMonth((current) => shiftMonth(current, -1))}><ChevronLeft size={16} /></button><button onClick={() => { const today = localDateKey(new Date()); setLearningMonth(today.slice(0, 7) + '-01'); setLearningDay(today); setJournalDate(today) }}>今天</button><button onClick={() => setLearningMonth((current) => shiftMonth(current, 1))}><ChevronRight size={16} /></button></div></div>
+                <div className="learning-calendar-filters"><select value={learningCalendarCourse} onChange={(event) => setLearningCalendarCourse(event.target.value)}><option value="all">全部课程</option>{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select><select value={learningCalendarKind} onChange={(event) => setLearningCalendarKind(event.target.value as LearningCalendarKind | 'all')}><option value="all">全部记录</option><option value="review">复习</option><option value="test">测试</option><option value="assignment">作业</option><option value="focus">专注</option><option value="journal">日记</option><option value="achievement">成就</option></select></div>
+                <div className="learning-calendar-weekdays">{['一', '二', '三', '四', '五', '六', '日'].map((day) => <span key={day}>周{day}</span>)}</div>
+                <div className="learning-calendar-grid">{learningMonthGrid.map((day) => <button key={day.date} className={`${day.inMonth ? '' : 'outside'} ${day.today ? 'today' : ''} ${learningDay === day.date ? 'selected' : ''}`} onClick={() => { setLearningDay(day.date); setJournalDate(day.date); setEditingJournalId(null); setJournalText('') }}><b>{day.day}</b>{day.hasHighlight ? <Star className="calendar-star" size={11} /> : null}<span className="calendar-dots">{day.counts.review ? <i className="review" /> : null}{day.counts.test ? <i className="test" /> : null}{day.counts.assignment ? <i className="assignment" /> : null}{day.counts.focus ? <i className="focus" /> : null}{day.counts.journal ? <i className="journal" /> : null}</span>{day.items.length ? <small>{day.items.length} 条</small> : null}</button>)}</div>
+                <div className="learning-calendar-legend"><span><i className="review" />复习</span><span><i className="test" />测试</span><span><i className="assignment" />作业</span><span><i className="focus" />专注</span><span><i className="journal" />日记</span><span><Star size={11} />稀有/里程碑</span></div>
+              </section>
+              <aside className="panel learning-day-detail"><span className="eyebrow">{learningDay}</span><h2>这一天的学习证据</h2>{selectedLearningItems.length ? <div className="learning-day-events">{selectedLearningItems.map((item) => <article className={item.kind} key={item.id}><i /><div><strong>{item.title}</strong><span>{item.detail || ({ review: '复习记录', test: '快速测试', assignment: '作业记录', focus: '专注记录', journal: '学习日记', achievement: '成长成就' }[item.kind])}</span></div><small>{item.occurredAt.includes('T') ? new Date(item.occurredAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''}</small></article>)}</div> : <p className="muted">这一天还没有留下应用内学习证据；可以在下方补写真实学习记录。</p>}{selectedJournalEntries.length ? <div className="learning-day-journals">{selectedJournalEntries.map((entry) => <article key={entry.id}><div><strong>{entry.mood}</strong><p>{entry.content}</p></div><span><button onClick={() => editJournal(entry)}>编辑</button><button onClick={() => deleteJournal(entry)}>删除</button></span></article>)}</div> : null}</aside>
+            </div>
+
             <div className="growth-layout growth-journal-layout">
-              <div className="journal-composer"><span className="eyebrow">今天的学习记录</span><h2>今天真正学到了什么？</h2><textarea value={journalText} onChange={(event) => setJournalText(event.target.value)} placeholder="例如：重新看了卷积课件，测试后发现边界条件仍然模糊……" /><div className="composer-footer"><div className="mood-picker">{(['轻松', '平稳', '吃力'] as JournalEntry['mood'][]).map((mood) => <button key={mood} className={journalMood === mood ? 'chosen' : ''} onClick={() => setJournalMood(mood)}>{mood}</button>)}</div><button className="primary-button" onClick={saveJournal}>保存记录</button></div></div>
+              <div className="journal-composer"><span className="eyebrow">{editingJournalId ? '编辑学习记录' : '补写 / 新建学习记录'}</span><h2>{journalDate} 真正学到了什么？</h2><label className="journal-date-picker">记录日期<input type="date" value={journalDate} onChange={(event) => { setJournalDate(event.target.value); setLearningDay(event.target.value) }} /></label><textarea value={journalText} onChange={(event) => setJournalText(event.target.value)} placeholder="例如：重新看了卷积课件，测试后发现边界条件仍然模糊……" /><div className="composer-footer"><div className="mood-picker">{(['轻松', '平稳', '吃力'] as JournalEntry['mood'][]).map((mood) => <button key={mood} className={journalMood === mood ? 'chosen' : ''} onClick={() => setJournalMood(mood)}>{mood}</button>)}</div><div className="journal-actions">{editingJournalId ? <button className="outline-button" onClick={cancelJournalEdit}>取消编辑</button> : null}<button className="primary-button" onClick={saveJournal}>{editingJournalId ? '保存修改' : '保存记录'}</button></div></div></div>
               <div className="panel trend-panel"><div className="panel-title"><h2>证据说明</h2></div><p className="muted">成长面板不会把“打开过文件”当成掌握，也不会用快速测试覆盖你的知识点自评。三类证据并列展示，方便你判断下一步该继续阅读、重新确认还是再次测试。</p></div>
             </div>
-            <div className="journal-list"><h2>每日记录</h2>{study.journal.length ? study.journal.map((entry) => <article key={entry.id}><div className="journal-date"><strong>{entry.date}</strong><span>{entry.mood}</span></div><p>{entry.content}</p></article>) : <p className="muted">还没有记录。写下第一条真实学习体验吧。</p>}</div>
+            <div className="journal-list"><h2>最近的每日记录</h2>{study.journal.length ? study.journal.slice().sort((left, right) => right.date.localeCompare(left.date)).slice(0, 12).map((entry) => <article key={entry.id}><div className="journal-date"><strong>{entry.date}</strong><span>{entry.mood}</span></div><p>{entry.content}</p><div className="journal-list-actions"><button onClick={() => editJournal(entry)}>编辑</button><button onClick={() => deleteJournal(entry)}>删除</button></div></article>) : <p className="muted">还没有记录。写下第一条真实学习体验吧。</p>}</div>
           </section>}
 
           {section === 'settings' && <section className="settings-page">
@@ -2534,7 +2727,7 @@ export default function App() {
                 ['light', '学术浅色', '温暖、清晰，适合白天阅读'], ['dark', '专注深色', '降低夜间长时间学习的亮度'], ['glass', '现代毛玻璃', '半透明层次与柔和渐变'], ['system', '跟随系统', '自动匹配 Windows 深浅色'],
               ] as [ThemePreference, string, string][]).map(([value, label, description]) => <button key={value} className={appPreferences.theme === value ? 'selected' : ''} onClick={() => updateAppPreference('theme', value)}><i className={`theme-swatch ${value}`} /><span><strong>{label}</strong><small>{description}</small></span>{appPreferences.theme === value ? <b>已选择</b> : null}</button>)}</div></div>
               <div className="panel settings-card"><div className="settings-card-head"><MonitorCog size={18} /><div><h2>界面缩放与字体</h2><p>整体放大字体、按钮和信息密度，适合高分辨率屏幕。</p></div></div><div className="ui-scale-options">{([.9, 1, 1.1, 1.2, 1.3, 1.4] as const).map((scale) => <button key={scale} className={appPreferences.uiScale === scale ? 'selected' : ''} onClick={() => updateAppPreference('uiScale', scale)}><strong>{Math.round(scale * 100)}%</strong><span>{scale === 1 ? '标准' : scale < 1 ? '紧凑' : scale >= 1.3 ? '特大' : '放大'}</span></button>)}</div><p className="settings-scale-note">缩放立即生效。较大缩放会减少同屏显示内容，但能显著改善小字号阅读。</p></div>
-              <div className="panel settings-card"><div className="settings-card-head"><MonitorCog size={18} /><div><h2>应用行为</h2><p>所有行为均可关闭，不会强制后台运行。</p></div></div><div className="setting-rows"><label><span><strong>界面动效</strong><small>页面切换、按钮和卡片使用轻量过渡</small></span><input type="checkbox" checked={appPreferences.motionEnabled} onChange={(event) => updateAppPreference('motionEnabled', event.target.checked)} /></label><label><span><strong>启动动画</strong><small>启动时显示约一秒的品牌过渡，可随时跳过</small></span><input type="checkbox" checked={appPreferences.launchAnimationEnabled} onChange={(event) => updateAppPreference('launchAnimationEnabled', event.target.checked)} /></label><label><span><strong>关闭后驻留托盘</strong><small>开启后关闭窗口不会退出，可从系统托盘重新打开</small></span><input type="checkbox" disabled={appBehaviorBusy} checked={keepRunningInTray} onChange={(event) => void updateBackgroundBehavior(event.target.checked)} /></label><label><span><strong>DDL 桌面提醒</strong><small>应用运行期间提醒临近截止的作业</small></span><input type="checkbox" checked={deadlineRemindersEnabled} onChange={(event) => setDeadlineRemindersEnabled(event.target.checked)} /></label><label><span><strong>Blackboard 自动缓存</strong><small>同步后自动缓存新发现的课程文件</small></span><input type="checkbox" checked={autoCacheEnabled} onChange={(event) => setAutoCacheEnabled(event.target.checked)} /></label></div></div>
+              <div className="panel settings-card"><div className="settings-card-head"><MonitorCog size={18} /><div><h2>应用行为</h2><p>所有行为均可关闭，不会强制后台运行。</p></div></div><div className="setting-rows"><label><span><strong>界面动效</strong><small>页面切换、按钮和卡片使用轻量过渡</small></span><input type="checkbox" checked={appPreferences.motionEnabled} onChange={(event) => updateAppPreference('motionEnabled', event.target.checked)} /></label><label><span><strong>启动动画</strong><small>启动时显示约一秒的品牌过渡，可随时跳过</small></span><input type="checkbox" checked={appPreferences.launchAnimationEnabled} onChange={(event) => updateAppPreference('launchAnimationEnabled', event.target.checked)} /></label><label className="celebration-setting"><span><strong>成就庆祝反馈</strong><small>完整模式显示稀有粒子和里程碑烟花；轻量模式仅显示卡片</small></span><select value={appPreferences.celebrationMode} onChange={(event) => updateAppPreference('celebrationMode', event.target.value as AppPreferences['celebrationMode'])}><option value="full">完整</option><option value="light">轻量</option><option value="off">关闭</option></select></label><label><span><strong>关闭后驻留托盘</strong><small>开启后关闭窗口不会退出，可从系统托盘重新打开</small></span><input type="checkbox" disabled={appBehaviorBusy} checked={keepRunningInTray} onChange={(event) => void updateBackgroundBehavior(event.target.checked)} /></label><label><span><strong>DDL 桌面提醒</strong><small>应用运行期间提醒临近截止的作业</small></span><input type="checkbox" checked={deadlineRemindersEnabled} onChange={(event) => setDeadlineRemindersEnabled(event.target.checked)} /></label><label><span><strong>Blackboard 自动缓存</strong><small>同步后自动缓存新发现的课程文件</small></span><input type="checkbox" checked={autoCacheEnabled} onChange={(event) => setAutoCacheEnabled(event.target.checked)} /></label></div></div>
               <div className="panel settings-card settings-auto-sync"><div className="settings-card-head"><RefreshCw size={18} /><div><h2>后台自动同步与 DDL 邮件</h2><p>应用运行或驻留托盘时，定时检查课程、作业与截止时间变化。</p></div></div><div className="auto-sync-master"><label><span><strong>启用后台自动同步</strong><small>默认关闭；开启后按设定间隔依次同步所选平台</small></span><input type="checkbox" checked={appPreferences.autoSync.enabled} onChange={(event) => updateAutoSyncPreference('enabled', event.target.checked)} /></label><label><span>同步间隔</span><select value={appPreferences.autoSync.intervalMinutes} onChange={(event) => updateAutoSyncPreference('intervalMinutes', Number(event.target.value) as AutoSyncPreferences['intervalMinutes'])}>{AUTO_SYNC_INTERVALS.map((minutes) => <option key={minutes} value={minutes}>{minutes < 60 ? `${minutes} 分钟` : `${minutes / 60} 小时`}</option>)}</select></label></div><div className="auto-sync-options"><label><input type="checkbox" checked={appPreferences.autoSync.syncOnLaunch} onChange={(event) => updateAutoSyncPreference('syncOnLaunch', event.target.checked)} /><span><strong>启动时同步</strong><small>启动约 8 秒后执行，给登录会话留出恢复时间</small></span></label><label><input type="checkbox" checked={appPreferences.autoSync.blackboard} onChange={(event) => updateAutoSyncPreference('blackboard', event.target.checked)} /><span><strong>同步 Blackboard</strong><small>课程、目录、资料和 Blackboard 作业</small></span></label><label><input type="checkbox" checked={appPreferences.autoSync.gradescope} onChange={(event) => updateAutoSyncPreference('gradescope', event.target.checked)} /><span><strong>同步 Gradescope</strong><small>课程、作业、提交状态和成绩</small></span></label><label><input type="checkbox" checked={appPreferences.autoSync.quietHoursEnabled} onChange={(event) => updateAutoSyncPreference('quietHoursEnabled', event.target.checked)} /><span><strong>免打扰时段</strong><small>暂停自动同步和 DDL 邮件，桌面手动操作不受影响</small></span></label></div>{appPreferences.autoSync.quietHoursEnabled ? <div className="auto-sync-quiet"><label>开始<input type="number" min="0" max="23" value={appPreferences.autoSync.quietStartHour} onChange={(event) => updateAutoSyncPreference('quietStartHour', Math.min(23, Math.max(0, Number(event.target.value) || 0)))} /></label><span>时 至</span><label>结束<input type="number" min="0" max="23" value={appPreferences.autoSync.quietEndHour} onChange={(event) => updateAutoSyncPreference('quietEndHour', Math.min(23, Math.max(0, Number(event.target.value) || 0)))} /></label><span>时</span></div> : null}<div className="deadline-threshold-settings"><div><strong>DDL 邮件阈值</strong><small>每个“作业 + 当前 DDL + 阈值”只发送一次；多个作业合并成一封邮件</small></div><div>{DEADLINE_EMAIL_THRESHOLDS.map((days) => <button key={days} className={appPreferences.autoSync.deadlineEmailThresholdDays.includes(days) ? 'selected' : ''} onClick={() => toggleDeadlineEmailThreshold(days)}>{days} 天前</button>)}</div></div><div className={`auto-sync-status ${autoSyncStatus.state}`}><i /><div><strong>{autoSyncStatus.message || '尚未运行自动同步'}</strong><small>{autoSyncStatus.lastSuccess ? `上次成功：${new Date(autoSyncStatus.lastSuccess).toLocaleString('zh-CN', { hour12: false })}` : '还没有成功记录'}{autoSyncStatus.nextAt ? ` · 下次：${new Date(autoSyncStatus.nextAt).toLocaleString('zh-CN', { hour12: false })}` : ''}</small></div></div>{appPreferences.autoSync.enabled && !keepRunningInTray ? <p className="auto-sync-note">当前没有开启托盘常驻。关闭主窗口后应用会退出，自动同步和邮件提醒也会停止。</p> : null}</div>
               <div className="panel settings-card settings-shortcuts">
                 <div className="settings-card-head shortcut-settings-head"><CommandIcon size={18} /><div><h2>快捷键</h2><p>每项都可以修改或关闭；快捷键仅在学径窗口内生效。</p></div><button className="outline-button" onClick={resetAllShortcutBindings}>恢复全部默认</button></div>
@@ -2606,8 +2799,9 @@ export default function App() {
       {showMigration && <div className="modal-backdrop" onMouseDown={() => busyKey !== 'migrate' && setShowMigration(false)}><div className="modal migration-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" disabled={busyKey === 'migrate'} onClick={() => setShowMigration(false)}><X size={16} /></button><span className="eyebrow">资料库迁移</span><h2>如何处理已有课程资料？</h2><p className="modal-note">旧位置：{vaultRoot}<br />新位置：{migrationTarget}</p>{migrationProgress && <div className="migration-progress"><span>正在处理 {migrationProgress.completed}/{migrationProgress.total}</span><strong>{migrationProgress.title || '正在完成…'}</strong></div>}<button className="primary-button wide" disabled={busyKey === 'migrate'} onClick={() => migrateVault('copy')}>复制到新位置（推荐）</button><button className="outline-button wide" disabled={busyKey === 'migrate'} onClick={() => migrateVault('move')}>迁移并删除已验证的旧副本</button><button className="text-button switch-vault-button" disabled={busyKey === 'migrate'} onClick={() => migrateVault('switch')}>仅切换位置，保留旧资料</button><p className="modal-note">复制或迁移都会逐个校验内容；同一文件不会重复复制。若有文件已被移动，资料页会显示“文件缺失”，可重新缓存。</p></div></div>}
       {showManualAssignment && <div className="modal-backdrop" onMouseDown={() => setShowManualAssignment(false)}><div className="modal manual-assignment-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" onClick={() => setShowManualAssignment(false)}><X size={16} /></button><span className="eyebrow">手动添加作业</span><h2>收纳其他来源的作业</h2><p className="modal-note">适用于课程群、微信、邮箱、线下布置或其他学习平台的作业。保存后会直接进入分析页面，可继续添加题目文件并让 AI 匹配课程知识点。</p><label>归属课程<select value={manualAssignmentCourseId} onChange={(event) => setManualAssignmentCourseId(event.target.value)}><option value="">新建课程…</option>{study.courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>{!manualAssignmentCourseId && <label>新课程名称<input value={manualAssignmentCourseName} onChange={(event) => setManualAssignmentCourseName(event.target.value)} placeholder="例如：数据结构" /></label>}<label>作业名称<input autoFocus value={manualAssignmentTitle} onChange={(event) => setManualAssignmentTitle(event.target.value)} placeholder="例如：Homework 3 / 课程项目" /></label><label>截止日期与时间（可选）<input type="datetime-local" value={manualAssignmentDueAt} onChange={(event) => setManualAssignmentDueAt(event.target.value)} /></label><label>题目说明（可选）<textarea value={manualAssignmentDetails} onChange={(event) => setManualAssignmentDetails(event.target.value)} placeholder="粘贴老师发布的要求、题目或评分说明；保存后可直接用于 AI 匹配。" /></label><label>作业网页链接（可选）<input value={manualAssignmentUrl} onChange={(event) => setManualAssignmentUrl(event.target.value)} placeholder="https://…，可用于打开提交或查看页面" /></label><button className="primary-button wide" disabled={!manualAssignmentTitle.trim() || (!manualAssignmentCourseId && !manualAssignmentCourseName.trim())} onClick={saveManualAssignment}>保存并开始分析</button></div></div>}
       {showEmailSettings && <div className="modal-backdrop" onMouseDown={() => !['email-settings', 'email-test'].includes(busyKey ?? '') && setShowEmailSettings(false)}><div className="modal email-settings-modal" onMouseDown={(event) => event.stopPropagation()}><button className="close" disabled={['email-settings', 'email-test'].includes(busyKey ?? '')} onClick={() => setShowEmailSettings(false)}><X size={16} /></button><span className="eyebrow">可选邮件通知</span><h2>配置 SMTP 邮箱</h2><p className="modal-note">首次同步只发送一条导入摘要；后续资料更新按课程聚合，不会为数百份文件逐封发送邮件。</p><div className="email-settings-grid"><label>SMTP 服务器<input value={emailConfig.host} onChange={(event) => { setEmailConfig((current) => ({ ...current, host: event.target.value })); setEmailTestState(null) }} placeholder="例如：smtp.qq.com" /></label><label>端口<input type="number" min="1" max="65535" value={emailConfig.port} onChange={(event) => { setEmailConfig((current) => ({ ...current, port: Number(event.target.value) || 465 })); setEmailTestState(null) }} /></label><label>邮箱账号<input type="email" value={emailConfig.username} onChange={(event) => { setEmailConfig((current) => ({ ...current, username: event.target.value })); setEmailTestState(null) }} placeholder="name@example.com" /></label><label>邮箱密码 / 授权码<input type="password" value={emailPassword} onChange={(event) => { setEmailPassword(event.target.value); setEmailTestState(null) }} placeholder={emailConfig.configured ? '留空则继续使用已加密密码' : '建议使用邮箱应用专用密码'} /></label><label>发件地址（可选）<input type="email" value={emailConfig.from} onChange={(event) => setEmailConfig((current) => ({ ...current, from: event.target.value }))} placeholder="默认使用邮箱账号" /></label><label>接收通知的邮箱<input type="email" value={emailConfig.recipient} onChange={(event) => { setEmailConfig((current) => ({ ...current, recipient: event.target.value })); setEmailTestState(null) }} placeholder="可以与邮箱账号不同" /></label><label>平台变化邮件<select value={emailConfig.syncEmailMode} onChange={(event) => setEmailConfig((current) => ({ ...current, syncEmailMode: event.target.value as SyncEmailMode, notifyCourseUpdates: event.target.value !== 'off' }))}><option value="important">仅重要变化（推荐）</option><option value="daily">每日聚合摘要</option><option value="every_sync">每次同步摘要</option><option value="off">关闭平台变化邮件</option></select></label>{emailConfig.syncEmailMode === 'daily' ? <label>每日摘要发送时间<select value={emailConfig.syncDigestHour} onChange={(event) => setEmailConfig((current) => ({ ...current, syncDigestHour: Number(event.target.value) }))}>{Array.from({ length: 24 }, (_, hour) => <option value={hour} key={hour}>{String(hour).padStart(2, '0')}:00</option>)}</select></label> : null}</div><div className="email-setting-switches"><label><input type="checkbox" checked={emailConfig.secure} onChange={(event) => setEmailConfig((current) => ({ ...current, secure: event.target.checked }))} /><span><strong>使用 SSL/TLS</strong><small>465 端口通常开启；587 端口通常关闭并使用 STARTTLS</small></span></label><label><input type="checkbox" checked={emailConfig.notifyDeadlines} onChange={(event) => setEmailConfig((current) => ({ ...current, notifyDeadlines: event.target.checked }))} /><span><strong>DDL 临近提醒</strong><small>独立于普通同步摘要，继续按设置的 1/3/5/7 天阈值提醒</small></span></label><label><input type="checkbox" checked={emailConfig.enabled} onChange={(event) => setEmailConfig((current) => ({ ...current, enabled: event.target.checked }))} /><span><strong>启用自动邮件通知</strong><small>关闭后仍保留配置，也可以继续发送测试邮件</small></span></label></div>{emailConfig.syncEmailMode === 'daily' && emailDigestQueue.length ? <div className="email-digest-pending">已有 {emailDigestQueue.length} 组变化等待每日摘要发送</div> : null}{emailTestState ? <div className={'ai-connection-state ' + emailTestState.kind}><span>{emailTestState.kind === 'testing' ? '正在测试' : emailTestState.kind === 'success' ? '发送成功' : '测试失败'}</span><strong>{emailTestState.message}</strong></div> : null}<div className="ai-settings-actions"><button className="outline-button" disabled={['email-settings', 'email-test'].includes(busyKey ?? '')} onClick={testEmailConfiguration}>{busyKey === 'email-test' ? '发送中…' : '发送测试邮件'}</button><button className="primary-button" disabled={['email-settings', 'email-test'].includes(busyKey ?? '')} onClick={saveEmailConfiguration}>{busyKey === 'email-settings' ? '保存中…' : '加密保存配置'}</button></div></div></div>}
+      {activeCelebration ? <div className={`achievement-celebration ${activeCelebration.tier} effects-${activeCelebration.effects}`} aria-live="polite">{activeCelebration.effects !== 'none' ? <div className="celebration-particles">{Array.from({ length: activeCelebration.effects === 'fireworks' ? 28 : 14 }, (_, index) => <i key={index} style={{ '--particle': index } as CSSProperties} />)}</div> : null}<div className="celebration-card"><span>{activeCelebration.tier === 'milestone' ? <Trophy size={24} /> : activeCelebration.tier === 'rare' ? <Star size={22} /> : <Award size={21} />}</span><div><small>{activeCelebration.tier === 'milestone' ? '高价值里程碑' : activeCelebration.tier === 'rare' ? '稀有成就' : '成长解锁'}</small><strong>{activeCelebration.title}</strong><p>{activeCelebration.description}</p></div><button onClick={() => setActiveCelebration(null)} aria-label="关闭成就提示"><X size={14} /></button></div></div> : null}
       {toast && <div className="toast">{toast}</div>}
-      {showLaunchAnimation && <div className="launch-splash" onClick={() => setShowLaunchAnimation(false)} role="presentation"><div className="launch-mark">径</div><strong>学径</strong><span>把分散的学习信息连成路径</span></div>}
+      {showLaunchAnimation && <div className="launch-splash" onClick={() => setShowLaunchAnimation(false)} role="presentation"><img className="launch-brand-image" src={growthJourneyImage} alt="" /><strong>学径</strong><span>把分散的学习信息连成路径</span></div>}
     </div>
   )
 }

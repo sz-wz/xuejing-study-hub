@@ -2,11 +2,13 @@ import { DEFAULT_SHORTCUT_PREFERENCES, normalizeShortcutPreferences, type Shortc
 import { DEFAULT_AUTO_SYNC_PREFERENCES, normalizeAutoSyncPreferences, type AutoSyncPreferences } from './background-sync'
 
 export type ThemePreference = 'light' | 'dark' | 'glass' | 'system'
+export type CelebrationMode = 'full' | 'light' | 'off'
 
 export type AppPreferences = {
   theme: ThemePreference
   motionEnabled: boolean
   launchAnimationEnabled: boolean
+  celebrationMode: CelebrationMode
   focusMinutes: number
   breakMinutes: number
   reviewQueueLimit: number
@@ -20,6 +22,7 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = {
   theme: 'light',
   motionEnabled: true,
   launchAnimationEnabled: true,
+  celebrationMode: 'full',
   focusMinutes: 25,
   breakMinutes: 5,
   reviewQueueLimit: 6,
@@ -43,6 +46,7 @@ export function normalizeAppPreferences(value: unknown): AppPreferences {
     theme,
     motionEnabled: typeof source.motionEnabled === 'boolean' ? source.motionEnabled : true,
     launchAnimationEnabled: typeof source.launchAnimationEnabled === 'boolean' ? source.launchAnimationEnabled : true,
+    celebrationMode: ['full', 'light', 'off'].includes(source.celebrationMode ?? '') ? source.celebrationMode as CelebrationMode : 'full',
     focusMinutes: boundedMinutes(source.focusMinutes, 25, 5, 120),
     breakMinutes: boundedMinutes(source.breakMinutes, 5, 1, 30),
     reviewQueueLimit: boundedMinutes(source.reviewQueueLimit, 6, 3, 12),

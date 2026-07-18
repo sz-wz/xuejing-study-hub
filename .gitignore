@@ -15,6 +15,9 @@ tmp/
 
 # Logs, caches and editor files
 *.log
+__pycache__/
+*.pyc
+~$*.docx
 .vite/
 .cache/
 .codex/
@@ -31,3 +34,4 @@ submission/competition-2026/media/audio/
 submission/competition-2026/media/xuejing-demo-*
 submission/competition-2026/media/xuejing-demo.*
 submission/competition-2026/media/screenshots/contact-sheet.jpg
+submission/competition-2026/voice-samples/
