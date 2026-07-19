@@ -2,7 +2,7 @@
 
 面向本科生的本地优先学习中枢：聚合 Blackboard、Gradescope、课程资料、作业截止时间与期末复习工作流，帮助学生少在多个平台之间切换，也能从真实课件出发梳理知识与复习进度。
 
-当前正式版：`1.2.0`。本项目是 Electron + React + TypeScript 的 Windows 桌面应用。
+当前正式版：`1.2.1`。本项目是 Electron + React + TypeScript 的 Windows 桌面应用。
 
 ## 免安装测试
 
@@ -12,7 +12,7 @@
 release\win-unpacked\学径.exe
 ```
 
-发布归档同时提供 `release/Xuejing-1.2.0-win-x64-portable.zip`，解压后运行其中的 `学径.exe` 即可。
+发布归档同时提供 `release/Xuejing-1.2.1-win-x64-portable.zip`，解压后运行其中的 `学径.exe` 即可。
 
 首次运行后，按需连接 Blackboard 或 Gradescope；学校统一身份认证、验证码与二次认证仍由用户在登录窗口中完成。
 

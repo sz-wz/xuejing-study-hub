@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer, webFrame } = require('electron')
 
 contextBridge.exposeInMainWorld('xuejing', {
   platform: process.platform,
-  version: '1.2.0',
+  version: '1.2.1',
   app: {
     settings: () => ipcRenderer.invoke('app:settings'),
     saveSettings: (payload) => ipcRenderer.invoke('app:save-settings', payload),

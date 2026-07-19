@@ -2,13 +2,18 @@
 
 ## 当前版本
 
-- 源码版本：`1.2.0`
+- 源码版本：`1.2.1`
 - 当前免安装构建：`release/win-unpacked/学径.exe`
-- 当前安装包：`release/Xuejing-1.2.0-win-x64.exe`
-- 当前安装包 SHA-256：`5A438CF20BB0040D703B8583DD9580852062E0B6F0472933BCE281B413142493`
-- 当前免安装归档：`release/Xuejing-1.2.0-win-x64-portable.zip`
-- 当前免安装归档 SHA-256：`91297F7489FEC7997997A954A64B58DCC189629B0105E46551B9B9FE3439631A`
+- 当前安装包：`release/Xuejing-1.2.1-win-x64.exe`
+- 当前安装包 SHA-256：`95A61D2B4067D5F20CB65E17CD548F4FFE8D74AFB8CDFB13383F026CB0AF5AC3`
+- 当前免安装归档：`release/Xuejing-1.2.1-win-x64-portable.zip`
+- 当前免安装归档 SHA-256：`C41EB291BD2252E302D53D69DD2A60634E40412D3B007477E0CA7DDF0F2E12AC`
 - 版本号需要同时更新 `package.json`、`package-lock.json`、`electron/preload.cjs`、`README.md`、`PRODUCT.md` 和 `docs/PROGRESS.md`。
+
+## v1.2.1 品牌统一补丁
+
+- 托盘、侧栏品牌标识和启动动画统一使用 `image-1.png`。
+- v1.2.0 参赛材料仍作为已冻结提交包保留；v1.2.1 不修改参赛内容结构。
 
 ## v1.2.0 参赛增强版
 

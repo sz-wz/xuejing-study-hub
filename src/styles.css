@@ -10,7 +10,7 @@ button { cursor: pointer; border: 0; }
 .sidebar { width: 248px; flex: 0 0 248px; height: 100vh; min-height: 0; overflow-y: auto; padding: 28px 16px 16px; display: flex; flex-direction: column; color: #dce7df; background: #10251f; scrollbar-width: none; }
 .sidebar::-webkit-scrollbar { width: 0; height: 0; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 12px; color: #fff; font-family: 'Playfair Display', serif; font-size: 25px; font-weight: 700; letter-spacing: 1px; }
-.brand-mark { width: 31px; height: 31px; display: grid; place-items: center; border: 1px solid #a6c7b3; border-radius: 9px; color: #d6e9dc; font-family: 'Noto Sans SC'; font-size: 18px; }
+.brand-mark { width: 34px; height: 34px; display: block; flex: 0 0 auto; border-radius: 10px; object-fit: contain; box-shadow: 0 5px 14px rgba(0, 20, 13, .24); }
 .semester { margin: 35px 8px 25px; padding: 14px 13px; border: 1px solid #2a443b; border-radius: 11px; background: #163128; display: grid; gap: 5px; }
 .semester strong { color: #f4f8f5; font-size: 14px; font-weight: 600; }.semester span:last-child { color: #9db6a7; font-size: 11px; }
 .eyebrow { display: block; color: #73847b; font-family: 'DM Mono', monospace; font-size: 10px; font-weight: 500; letter-spacing: .075em; text-transform: uppercase; }
@@ -507,7 +507,7 @@ html[data-theme='dark'] .learning-calendar-grid > button { color: #c5d1ca; backg
 html[data-theme='dark'] .learning-calendar-grid > button.outside { color: #64736b; background: #141b21; }
 html[data-theme='dark'] .learning-day-events article { background: #202b32; }
 .achievement-journey-art { width: 78px; height: 78px; margin-left: auto; border-radius: 20px; object-fit: cover; box-shadow: 0 10px 26px rgba(24,70,51,.18); }
-.launch-brand-image { width: 96px; height: 96px; border: 1px solid rgba(221,240,197,.52); border-radius: 28px; object-fit: cover; box-shadow: 0 18px 50px rgba(3,20,12,.34); animation: launch-mark .72s cubic-bezier(.2,.85,.28,1.2) both; }
+.launch-brand-image { width: 108px; height: 108px; border: 1px solid rgba(221,240,197,.52); border-radius: 29px; object-fit: contain; box-shadow: 0 18px 50px rgba(3,20,12,.34); animation: launch-mark .72s cubic-bezier(.2,.85,.28,1.2) both; }
 @media (max-width: 900px) { .achievement-journey-art { display: none; } }
 
 .pdf-render-status { display: inline-flex; align-items: center; gap: 4px; color: #66806f !important; }

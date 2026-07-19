@@ -1,13 +1,15 @@
 const fs = require('fs')
 const path = require('path')
 const { createCanvas, loadImage } = require('@napi-rs/canvas')
-const { createBrandIconPng, createTrayIconPng } = require('./tray-icon.cjs')
+const { createBrandIconPng } = require('./tray-icon.cjs')
 
 const buildDir = path.join(__dirname, '..', 'build')
 fs.mkdirSync(buildDir, { recursive: true })
 const sourcePath = path.join(buildDir, 'source', 'xuejing-app-icon.png')
 const electronAssetsDir = path.join(__dirname, 'assets')
+const rendererAssetsDir = path.join(__dirname, '..', 'src', 'assets')
 fs.mkdirSync(electronAssetsDir, { recursive: true })
+fs.mkdirSync(rendererAssetsDir, { recursive: true })
 
 function removeConnectedWhiteBackground(canvas) {
   const context = canvas.getContext('2d')
@@ -77,7 +79,8 @@ async function main() {
   fs.writeFileSync(path.join(buildDir, 'icon.png'), largest)
   fs.writeFileSync(path.join(buildDir, 'icon.ico'), buildIco(images))
   fs.writeFileSync(path.join(electronAssetsDir, 'app-icon.png'), largest)
-  fs.writeFileSync(path.join(electronAssetsDir, 'tray-icon.png'), createTrayIconPng())
+  fs.writeFileSync(path.join(electronAssetsDir, 'tray-icon.png'), largest)
+  fs.writeFileSync(path.join(rendererAssetsDir, 'app-icon.png'), largest)
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1 })

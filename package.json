@@ -1,6 +1,6 @@
 {
   "name": "xuejing-study-hub",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "本科生学习聚合与复习中枢（Windows 正式版）",
   "main": "electron/entry.cjs",

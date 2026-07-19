@@ -78,3 +78,10 @@ test('课程资料与知识库操作栏在窄内容区保持横向文字并安�
   assert.match(styles, /\.knowledge-actions\s*>\s*button[^}]*white-space:\s*nowrap/s)
   assert.match(styles, /@media\s*\(max-width:\s*1500px\)[\s\S]*\.page-heading\.action-heading[^}]*flex-direction:\s*column/s)
 })
+
+test('侧栏品牌与启动动画使用统一应用图标', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'App.tsx'), 'utf8')
+  assert.match(source, /import appIconImage from '\.\/assets\/app-icon\.png'/)
+  assert.match(source, /className="brand-mark" src=\{appIconImage\}/)
+  assert.match(source, /className="launch-brand-image" src=\{appIconImage\}/)
+})
