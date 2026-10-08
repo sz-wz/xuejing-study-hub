@@ -334,8 +334,8 @@ Reuses：方案 B 的全部模块，但需要新增任务和奖励经济系统�
 
 ## Icon Direction
 
-- 主应用图标：`local-design-assets/image-1.png`。
-- 成就系统、启动页或成长插图：`local-design-assets/image-2.png`。
+- 主应用图标：本地设计素材 `image-1.png`。
+- 成就系统、启动页或成长插图：本地设计素材 `image-2.png`。
 - 托盘图标：从主图标提取“路径 + 星光”的单色简化轮廓，不直接缩小整本书。
 - 最终需要生成 16、20、24、32、40、48、64、128、256 像素 Windows ICO 层级并逐级检查。
 

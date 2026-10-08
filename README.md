@@ -10,15 +10,15 @@
 
 ## 产品展示
 
-![学习总览](submission/competition-2026/media/screenshots/01-overview.png)
+![学习总览](docs/portfolio/screenshots/01-overview.png)
 
 | 学习收件箱 | 资料库 | 作业中心 |
 | --- | --- | --- |
-| ![学习收件箱](submission/competition-2026/media/screenshots/02-inbox.png) | ![资料库](submission/competition-2026/media/screenshots/03-library.png) | ![作业中心](submission/competition-2026/media/screenshots/04-assignments.png) |
+| ![学习收件箱](docs/portfolio/screenshots/02-inbox.png) | ![资料库](docs/portfolio/screenshots/03-library.png) | ![作业中心](docs/portfolio/screenshots/04-assignments.png) |
 
 | 知识库 | 复习工作区 | 学习日历 |
 | --- | --- | --- |
-| ![知识库](submission/competition-2026/media/screenshots/05-knowledge.png) | ![复习工作区](submission/competition-2026/media/screenshots/07-review.png) | ![学习日历](submission/competition-2026/media/screenshots/09b-learning-calendar.png) |
+| ![知识库](docs/portfolio/screenshots/05-knowledge.png) | ![复习工作区](docs/portfolio/screenshots/07-review.png) | ![学习日历](docs/portfolio/screenshots/09b-learning-calendar.png) |
 
 ## 作品集重点
 
@@ -53,7 +53,7 @@
 src/       React 界面、学习工作流和可测试的前端领域逻辑
 electron/  主进程、IPC、平台集成、同步、OCR 和本地数据能力
 docs/      产品设计、架构、进度和发布记录
-submission/competition-2026/  产品截图、演示材料和参赛资料
+docs/portfolio/screenshots/  使用虚构课程和演示账号的产品截图
 ```
 
 ## 从 GitHub 获取

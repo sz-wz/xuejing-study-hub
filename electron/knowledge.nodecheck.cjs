@@ -139,7 +139,7 @@ test('知识条目会排除课件中的联系方式、授课信息和页眉', as
     assert.ok(titles.includes('Finite state machine based programming'))
     assert.ok(titles.includes('Round-robin scheduling with RTX51'))
     assert.ok(titles.includes('Priorities and preemption'))
-    assert.ok(!titles.some((title) => /demo instructor|contact@example.com|qq\.com|lecture #8/i.test(title)))
+    assert.ok(!titles.some((title) => /demo instructor|contact@example\.com|qq\.com|lecture #8/i.test(title)))
   } finally {
     await fs.rm(sandbox, { recursive: true, force: true })
   }

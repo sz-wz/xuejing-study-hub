@@ -28,15 +28,5 @@ __pycache__/
 Thumbs.db
 desktop.ini
 
-# Competition submission QA and temporary media
-submission/competition-2026/qa/
-submission/competition-2026/media/audio/
-submission/competition-2026/media/xuejing-demo-*
-submission/competition-2026/media/xuejing-demo.*
-submission/competition-2026/media/screenshots/contact-sheet.jpg
-submission/competition-2026/voice-samples/
-
-# Private competition documents and export media (keep local, never publish)
-submission/competition-2026/*.docx
-submission/competition-2026/*.pptx
-submission/competition-2026/*.mp4
+# Private submission materials stay local; public screenshots live in docs/portfolio/
+submission/
