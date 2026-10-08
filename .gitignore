@@ -35,3 +35,8 @@ submission/competition-2026/media/xuejing-demo-*
 submission/competition-2026/media/xuejing-demo.*
 submission/competition-2026/media/screenshots/contact-sheet.jpg
 submission/competition-2026/voice-samples/
+
+# Private competition documents and export media (keep local, never publish)
+submission/competition-2026/*.docx
+submission/competition-2026/*.pptx
+submission/competition-2026/*.mp4
